@@ -36,7 +36,7 @@ def test_concat_mla_q():
         op_name="concat_mla_q",
         input_fn=input_kwargs,
         torch_op=torch_concat_mla_q,
-        gems_ops=flaggems_vllm.concat_mla_q,
+        gems_op=flaggems_vllm.concat_mla_q,
         dtypes=consts.FLOAT_DTYPES,
     )
     bench.run()
