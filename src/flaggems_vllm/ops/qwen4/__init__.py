@@ -29,7 +29,38 @@ from flaggems_vllm.ops.qwen4.qsa import (
     qwen4_vendor_store_qsa_rows,
 )
 
+from .hyperconnection import can_use_hc_combine_norm_triton, qwen4_hc_combine_norm
+from .ple_fusion import (
+    can_use_ple_gate_norm_triton,
+    can_use_ple_prefill_conv_triton,
+    ple_gate_norm,
+    ple_gate_norm_,
+    ple_prefill_short_conv_,
+)
+from .qsa import (
+    qsa_compress_groups_with_ratio,
+    qsa_compress_norm_mrope_store_groups,
+    qsa_mqa_paged,
+    qsa_store_cache_rows,
+    qsa_store_kv_cache_rows,
+)
+from .qsa_attention import qsa_sparse_paged_attention, qsa_sparse_split_count
+
 __all__ = [
+    "qwen4_hc_combine_norm",
+    "ple_gate_norm_",
+    "ple_gate_norm",
+    "ple_prefill_short_conv_",
+    "qsa_mqa_paged",
+    "qsa_store_cache_rows",
+    "qsa_store_kv_cache_rows",
+    "qsa_compress_groups_with_ratio",
+    "qsa_compress_norm_mrope_store_groups",
+    "qsa_sparse_paged_attention",
+    "qsa_sparse_split_count",
+    "can_use_hc_combine_norm_triton",
+    "can_use_ple_gate_norm_triton",
+    "can_use_ple_prefill_conv_triton",
     "can_use_hc_inject_triton",
     "can_use_hc_triton",
     "ple_state_gather",
