@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from flaggems_vllm.runtime import device as runtime_device
+
 from .qsa import _is_triton_device
 
 _QSA_SPLIT_ALLOWED = (1, 2, 4, 8, 16, 32)
@@ -23,7 +25,7 @@ def qsa_sparse_triton_launch_config(
     conservative Triton configuration until it has its own benchmark.
     """
 
-    if device.type != "cuda" or torch.version.hip is not None:
+    if runtime_device.vendor_name != "nvidia" or device.type != "cuda":
         return 16, 4, 2
     try:
         if torch.cuda.get_device_capability(device) == (9, 0):
