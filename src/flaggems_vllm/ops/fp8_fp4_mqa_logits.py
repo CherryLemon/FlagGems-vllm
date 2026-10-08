@@ -557,11 +557,48 @@ def fp8_fp4_mqa_logits(
     q_values, q_scale = q
     k_values, k_scales = kv
 
+    if q_values.ndim != 3 or k_values.ndim != 2:
+        raise ValueError("MQA expects Q[M,H,D] and K[N,D]")
+    m, h, packed_dim = q_values.shape
+    n, dim = k_values.shape
+    if k_scales.shape != (n,) or k_scales.dtype != torch.float32:
+        raise ValueError("MQA key scales must be float32 [N]")
+    if not k_scales.is_contiguous():
+        raise ValueError("MQA key scales must be contiguous")
+    if weights.shape != (m, h) or weights.dtype != torch.float32:
+        raise ValueError("MQA weights must be float32 [M,H]")
+    if q_scale is None:
+        if q_values.dtype != torch.float8_e4m3fn or packed_dim != dim:
+            raise ValueError("FP8 MQA expects E4M3FN query with the key dimension")
+    elif (
+        q_values.dtype != torch.uint8
+        or packed_dim * 2 != dim
+        or q_scale.shape != (m, h, 1)
+        or q_scale.dtype != torch.int32
+    ):
+        raise ValueError("MXFP4 MQA expects packed uint8 Q and int32 [M,H,1] scales")
+    tensors = (k_values, k_scales, weights, q_scale, cu_seqlen_ks, cu_seqlen_ke)
+    if any(t is not None and t.device != q_values.device for t in tensors):
+        raise ValueError("MQA tensors must share the query device")
+    if (
+        k_values.dtype != torch.float8_e4m3fn
+        or q_values.stride(-1) != 1
+        or k_values.stride(-1) != 1
+    ):
+        raise ValueError("MQA expects E4M3FN keys and contiguous feature dimensions")
+    if clean_logits and any(
+        t.shape != (m,) or t.dtype != torch.int32 or not t.is_contiguous()
+        for t in (cu_seqlen_ks, cu_seqlen_ke)
+    ):
+        raise ValueError("MQA valid ranges must be contiguous int32 [M]")
+
     logits = torch.empty(
         (q_values.shape[0], k_values.shape[0]),
         dtype=torch.float32,
         device=q_values.device,
     )
+    if m == 0 or n == 0:
+        return logits
 
     grid = lambda META: (
         triton.cdiv(q_values.shape[0], META["BLOCK_M"]),
