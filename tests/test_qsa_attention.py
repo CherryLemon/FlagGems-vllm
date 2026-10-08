@@ -109,7 +109,7 @@ def _run(ops, case, out, *, workspace=None):
         case["indices"],
         case["table"],
         case["token_to_req"],
-        256**-0.5,
+        case["q"].shape[-1] ** -0.5,
         out,
         gate=case["gate"],
         split_workspace=workspace,
