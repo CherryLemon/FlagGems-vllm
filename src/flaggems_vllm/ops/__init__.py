@@ -136,6 +136,11 @@ from flaggems_vllm.ops.silu_and_mul_with_clamp import (
 )
 from flaggems_vllm.ops.skip_layernorm import skip_layer_norm
 from flaggems_vllm.ops.sparse_attention import sparse_attn_triton
+from flaggems_vllm.ops.minimax_m3_sparse_attention import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+    minimax_m3_sparse_decode_workspace,
+)
 from flaggems_vllm.ops.stage_deepseek_v4_mega_moe_inputs import (
     stage_deepseek_v4_mega_moe_inputs,
 )
@@ -156,6 +161,9 @@ from flaggems_vllm.ops.weight_norm import weight_norm
 # isort: on
 
 __all__ = [
+    "minimax_m3_sparse_attn",
+    "minimax_m3_sparse_attn_decode",
+    "minimax_m3_sparse_decode_workspace",
     "act_quant_triton",
     "add_rms_norm",
     "apply_repetition_penalties",
