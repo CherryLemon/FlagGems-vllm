@@ -78,6 +78,9 @@ if has_triton_tle(3, 6, 0) and _vendor_tle_enabled():
         import triton.experimental.tle.language as tle
 
         HAS_TLE = supports_topk_tle(tle)
+        if not HAS_TLE:
+            # Triton's dependency walk also visits disabled TLE branches.
+            tle = None
     except ImportError:
         tle = None
         HAS_TLE = False

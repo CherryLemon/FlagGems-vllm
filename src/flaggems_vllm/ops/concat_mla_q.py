@@ -106,20 +106,21 @@ def concat_mla_q(
         return
     tokens, heads, nope = ql_nope.shape
     width = q_out.shape[-1]
-    _concat_mla_q_kernel[lambda meta: (triton.cdiv(q_out.numel(), meta["BLOCK"]),)](
-        ql_nope,
-        q_pe,
-        q_out,
-        tokens * heads * width,
-        heads,
-        nope,
-        width,
-        *ql_nope.stride(),
-        q_pe.stride(0),
-        0 if q_pe.shape[1] == 1 else q_pe.stride(1),
-        q_pe.stride(2),
-        *q_out.stride(),
-    )
+    with torch.cuda.device(ql_nope.device):
+        _concat_mla_q_kernel[lambda meta: (triton.cdiv(q_out.numel(), meta["BLOCK"]),)](
+            ql_nope,
+            q_pe,
+            q_out,
+            tokens * heads * width,
+            heads,
+            nope,
+            width,
+            *ql_nope.stride(),
+            q_pe.stride(0),
+            0 if q_pe.shape[1] == 1 else q_pe.stride(1),
+            q_pe.stride(2),
+            *q_out.stride(),
+        )
 
 
 __all__ = ["concat_mla_q"]

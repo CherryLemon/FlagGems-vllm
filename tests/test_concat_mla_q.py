@@ -116,3 +116,31 @@ def test_graph_replay_consumes_new_inputs_and_writes_output():
         torch.cuda.synchronize()
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
         assert out.data_ptr() == address
+
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="requires at least two CUDA GPUs"
+)
+@pytest.mark.concat_mla_q
+@pytest.mark.parametrize("input_device", [0, 1])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("broadcast", [False, True])
+def test_concat_mla_q_uses_input_device_and_restores_current(
+    input_device, dtype, broadcast
+):
+    device = torch.device("cuda", input_device)
+    qn = torch.randn(7, 4, 31, device=device, dtype=dtype)
+    qr = torch.randn(7, 1 if broadcast else 4, 17, device=device, dtype=dtype)
+    out = torch.empty(7, 4, 48, device=device, dtype=dtype)
+    with torch.cuda.device(1 - input_device):
+        current = torch.cuda.current_device()
+        for _ in range(2):
+            qn.normal_()
+            qr.normal_()
+            out.fill_(float("nan"))
+            expected = torch.cat([qn, qr.expand(7, 4, 17)], dim=-1)
+            assert torch.cuda.current_device() == current
+            assert flaggems_vllm.concat_mla_q(qn, qr, out) is None
+            assert torch.cuda.current_device() == current
+            torch.cuda.synchronize(device)
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
