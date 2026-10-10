@@ -230,8 +230,8 @@ def _clean_logits_kernel(
 )
 @triton.jit
 def _fp8_fp4_mqa_logits_mxfp4_kernel(
-    Q_ptr,  # uint8 [M, H, D//2] packed E2M1 (2 nibbles per byte)
-    Q_scale_ptr,  # int32 [M, H] holding D//32 ue8m0 bytes (little-endian)
+    Q_ptr,  # uint8/int8 [M, H, D//2] packed E2M1 (2 nibbles per byte)
+    Q_scale_ptr,  # int32 [M, H] or [M, H, 1], packed ue8m0 bytes (little-endian)
     K_ptr,  # fp8 [N, D]
     K_scale_ptr,  # fp32 [N] per-token scale
     W_ptr,  # fp32 [M, H] per-head weights (NO q_scale folded)
@@ -541,8 +541,9 @@ def fp8_fp4_mqa_logits(
         q: Tuple of (q_values, q_scale).
             FP8 path: q_values [M, H, D] float8_e4m3fn, q_scale is None
                 (per-token q_scale already folded into `weights`).
-            FP4 path: q_values [M, H, D//2] uint8 (packed E2M1), q_scale
-                [M, H] int32 (D//32 ue8m0 bytes per token-head, little-endian).
+            FP4 path: q_values [M, H, D//2] uint8 or int8 (packed E2M1),
+                q_scale [M, H] or [M, H, 1] int32 (D//32 ue8m0 bytes per
+                token-head, little-endian). Token/head strides are preserved.
         kv: Tuple of (k_values [N, D] fp8, k_scales [N] fp32).
         weights: [M, H] fp32 per-head weights.
         cu_seqlen_ks: [M] int32 start indices for valid K range.
@@ -571,12 +572,14 @@ def fp8_fp4_mqa_logits(
         if q_values.dtype != torch.float8_e4m3fn or packed_dim != dim:
             raise ValueError("FP8 MQA expects E4M3FN query with the key dimension")
     elif (
-        q_values.dtype != torch.uint8
+        q_values.dtype not in (torch.uint8, torch.int8)
         or packed_dim * 2 != dim
-        or q_scale.shape != (m, h, 1)
+        or q_scale.shape not in ((m, h), (m, h, 1))
         or q_scale.dtype != torch.int32
     ):
-        raise ValueError("MXFP4 MQA expects packed uint8 Q and int32 [M,H,1] scales")
+        raise ValueError(
+            "MXFP4 MQA expects packed uint8/int8 Q and int32 [M,H] or [M,H,1] scales"
+        )
     tensors = (k_values, k_scales, weights, q_scale, cu_seqlen_ks, cu_seqlen_ke)
     if any(t is not None and t.device != q_values.device for t in tensors):
         raise ValueError("MQA tensors must share the query device")
@@ -606,8 +609,8 @@ def fp8_fp4_mqa_logits(
     )
 
     if q_scale is not None:
-        # MXFP4 Q path: q_values is packed uint8 [M, H, D//2], q_scale is
-        # int32 [M, H] holding D//32 ue8m0 bytes per (token, head).
+        # MXFP4 Q path: preserve packed uint8/int8 Q and the original rank-2
+        # or rank-3 int32 scale object; the kernel uses token/head strides.
         M, H, D2 = q_values.shape
         D = D2 * 2
         N = k_values.shape[0]
