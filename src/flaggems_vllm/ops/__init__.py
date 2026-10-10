@@ -184,7 +184,6 @@ from flaggems_vllm.ops.kpool import (
 )
 from flaggems_vllm.ops.mhc_with_norm import (
     mhc_fused_post_pre_with_norm,
-    mhc_pre_broadcast_tilelang,
     mhc_pre_with_norm,
     mhc_rms_norm,
 )
@@ -316,7 +315,6 @@ __all__ = [
     "mhc_rms_norm",
     "mhc_pre_with_norm",
     "mhc_fused_post_pre_with_norm",
-    "mhc_pre_broadcast_tilelang",
     "concat_mla_q",
     "concat_query",
     "pad_attention_heads",

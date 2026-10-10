@@ -110,10 +110,6 @@ EXPLICIT_SOURCE_TO_TESTS = {
     ],
     "src/flaggems_vllm/ops/mhc_with_norm.py": [
         "tests/test_mhc_with_norm.py",
-        "tests/test_mhc_broadcast_tilelang.py",
-    ],
-    "src/flaggems_vllm/ops/mhc_broadcast_tilelang.py": [
-        "tests/test_mhc_broadcast_tilelang.py"
     ],
     "src/flaggems_vllm/ops/flashmla_sparse.py": [
         "tests/test_flash_mla_sparse_fwd.py",

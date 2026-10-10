@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """MHC fused-op ABI, preserving BF16 materialization before RMS normalization."""
-from functools import lru_cache
-
 import torch
 import triton
 import triton.language as tl
@@ -123,33 +121,3 @@ def mhc_fused_post_pre_with_norm(
             norm_eps,
         ),
     )
-
-
-def mhc_pre_broadcast_tilelang(*args, **kwargs):
-    # Optional TileLang never imports during ordinary library registration.
-    impl = _broadcast_impl()
-    if impl is None:
-        raise NotImplementedError(
-            "MHC broadcast requires NVIDIA, TileLang and DeepGEMM"
-        )
-    return impl(*args, **kwargs)
-
-
-@lru_cache(maxsize=1)
-def _broadcast_impl():
-    if runtime.device.vendor_name != "nvidia" or not torch.cuda.is_available():
-        return None
-    try:
-        from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-        if not is_deep_gemm_supported():
-            return None
-        from flaggems_vllm.ops.mhc_broadcast_tilelang import (
-            mhc_pre_broadcast_tilelang as impl,
-        )
-    except (ImportError, OSError):
-        return None
-    return impl
-
-
-mhc_pre_broadcast_tilelang._is_available = lambda: _broadcast_impl() is not None
