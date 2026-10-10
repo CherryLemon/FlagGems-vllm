@@ -2,6 +2,7 @@
 """Stateful causal convolution against an independent sequence oracle."""
 
 import importlib
+import math
 
 import pytest
 import torch
@@ -16,14 +17,17 @@ def _reference(sequences, state, weight, bias, slots, initial, activation):
     outputs = []
     width = weight.shape[-1]
     for req, x in enumerate(sequences):
+        if x.shape[-1] == 0:
+            outputs.append(torch.empty_like(x))
+            continue
         slot = slots[req]
         if slot < 0:
             outputs.append(torch.zeros_like(x))
             continue
         history = (
-            state[slot, :, -(width - 1) :].clone()
+            state[slot, :, : width - 1].clone()
             if initial[req]
-            else torch.zeros_like(state[slot, :, -(width - 1) :])
+            else torch.zeros_like(state[slot, :, : width - 1])
         )
         y = torch.empty_like(x)
         for token in range(x.shape[-1]):
@@ -35,9 +39,9 @@ def _reference(sequences, state, weight, bias, slots, initial, activation):
                 result += bias.float()
             if activation:
                 result = result * torch.sigmoid(result)
-            y[:, token] = result.to(x.dtype)
+            y[:, token] = result.to(state.dtype).to(x.dtype)
             history = window[:, 1:].to(state.dtype)
-        final[slot, :, -(width - 1) :] = history
+        final[slot, :, : width - 1] = history
         outputs.append(y)
     return outputs, final
 
@@ -131,6 +135,161 @@ def test_single_token_decode_preserves_rank_and_state_dtype_rounding():
     assert actual.shape == x.shape and actual.dtype == x.dtype
     _close(actual, expected[0].t())
     torch.testing.assert_close(state, final, rtol=0, atol=0)
+
+
+def _run_layout(mode, sequences, state, weight, bias, slots, activation, initial=None):
+    """Return all layouts as [dim, total_tokens] for hand-calculated checks."""
+    indices = torch.tensor(slots, dtype=torch.int32, device=gems.device)
+    if mode == "regular":
+        output = gems.causal_conv1d_update(
+            torch.stack(sequences),
+            state,
+            weight,
+            bias,
+            activation=activation,
+            conv_state_indices=indices,
+        )
+        return torch.cat(list(output.unbind()), dim=-1)
+    boundaries = [0]
+    for sequence in sequences:
+        boundaries.append(boundaries[-1] + sequence.shape[-1])
+    starts = torch.tensor(boundaries, dtype=torch.int32, device=gems.device)
+    x = torch.cat(sequences, dim=-1)
+    if mode == "prefill":
+        return gems.causal_conv1d_fn(
+            x,
+            weight,
+            bias,
+            state,
+            starts,
+            cache_indices=indices,
+            has_initial_state=initial,
+            activation=activation,
+        )
+    return gems.causal_conv1d_update(
+        x.t(),
+        state,
+        weight,
+        bias,
+        activation=activation,
+        conv_state_indices=indices,
+        query_start_loc=starts,
+    ).t()
+
+
+@pytest.mark.parametrize("mode", ["prefill", "regular", "varlen"])
+def test_history_prefix_and_extra_storage_against_hand_calculation(mode):
+    # The suffix is deliberately very different from the first width-1 values.
+    # It belongs to extra cache storage, not to this non-speculative history.
+    state = torch.tensor(
+        [
+            [[1, 2, 3, 701, 702, 703, 704], [4, 5, 6, 711, 712, 713, 714]],
+            [[101, 102, 103, 104, 105, 106, 107]] * 2,
+            [[7, 8, 9, 721, 722, 723, 724], [10, 11, 12, 731, 732, 733, 734]],
+        ],
+        dtype=torch.float32,
+        device=gems.device,
+    )
+    expected_state = state.clone()
+    expected_state[2, :, :3] = torch.tensor(
+        [[9, 10, 11], [12, 13, 14]], device=gems.device
+    )
+    expected_state[0, :, :3] = torch.tensor([[3, 4, 5], [6, 7, 8]], device=gems.device)
+    sequences = [
+        torch.tensor([[10, 11], [13, 14]], dtype=torch.float32, device=gems.device),
+        torch.tensor([[4, 5], [7, 8]], dtype=torch.float32, device=gems.device),
+    ]
+    weight = torch.tensor([[1, 10, 100, 1000], [0.5, -1, 2, -3]], device=gems.device)
+    expected = torch.tensor(
+        [[10987, 12098, 4321, 5432], [-21, -22.5, -12, -13.5]],
+        device=gems.device,
+    )
+    actual = _run_layout(mode, sequences, state, weight, None, [2, 0], None)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("mode", ["prefill", "regular", "varlen"])
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("activation", [None, "silu"])
+def test_fp32_output_materializes_activated_result_in_state_dtype(
+    mode, state_dtype, activation
+):
+    state = torch.full((3, 3, 5), -77, dtype=state_dtype, device=gems.device)
+    prefix = [0.25, 0.5, 0.75]
+    state[1, :, 0] = torch.tensor(prefix, dtype=state_dtype, device=gems.device)
+    expected_state = state.clone()
+    values = [0.3333333, 0.6666666, 1.000001]
+    x = torch.tensor(values, dtype=torch.float32, device=gems.device).unsqueeze(-1)
+    rounded_x = torch.tensor(values, dtype=state_dtype).float().tolist()
+    # One width-2 step: history * 1/2 + materialized_input * 1/4 + 1/8.
+    # These binary-exact coefficients isolate the required output rounding.
+    results = [old * 0.5 + new * 0.25 + 0.125 for old, new in zip(prefix, rounded_x)]
+    if activation:
+        results = [value / (1 + math.exp(-value)) for value in results]
+    expected = torch.tensor(results, dtype=state_dtype).float().to(gems.device)
+    expected = expected.unsqueeze(-1)
+    unrounded = torch.tensor(results, dtype=torch.float32)
+    assert not torch.equal(unrounded, expected.cpu().squeeze(-1))
+    expected_state[1, :, 0] = x[:, 0].to(state_dtype)
+    weight = torch.tensor([[0.5, 0.25]] * 3, device=gems.device)
+    bias = torch.full((3,), 0.125, device=gems.device)
+    actual = _run_layout(mode, [x], state, weight, bias, [1], activation)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+
+
+def _empty_request_data(all_empty):
+    state = torch.tensor(
+        [
+            [[1, 2, 51, 52, 53], [7, 8, 54, 55, 56]],
+            [[11, 12, 61, 62, 63], [17, 18, 64, 65, 66]],
+            [[21, 22, 71, 72, 73], [27, 28, 74, 75, 76]],
+        ],
+        dtype=torch.float32,
+        device=gems.device,
+    )
+    empty = torch.empty(2, 0, device=gems.device)
+    tokens = torch.tensor([[3, 4], [5, 6]], dtype=torch.float32, device=gems.device)
+    sequences = [empty, empty if all_empty else tokens, empty]
+    weight = torch.tensor([[1, 2, 3]] * 2, dtype=torch.float32, device=gems.device)
+    expected_state = state.clone()
+    if not all_empty:
+        expected_state[0, :, :2] = tokens
+    return sequences, state, expected_state, weight
+
+
+@pytest.mark.parametrize("all_empty", [False, True])
+@pytest.mark.parametrize("has_initial_state", [False, True])
+def test_prefill_empty_requests_preserve_cache(all_empty, has_initial_state):
+    sequences, state, expected_state, weight = _empty_request_data(all_empty)
+    initial = torch.full((3,), has_initial_state, device=gems.device)
+    actual = _run_layout(
+        "prefill", sequences, state, weight, None, [2, 0, 1], None, initial
+    )
+    if all_empty:
+        expected = torch.empty(2, 0, device=gems.device)
+    else:
+        values = [[14, 20], [38, 36]] if has_initial_state else [[9, 18], [15, 28]]
+        expected = torch.tensor(values, dtype=torch.float32, device=gems.device)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "all_empty"), [("regular", True), ("varlen", False), ("varlen", True)]
+)
+def test_decode_empty_requests_preserve_cache(mode, all_empty):
+    sequences, state, expected_state, weight = _empty_request_data(all_empty)
+    actual = _run_layout(mode, sequences, state, weight, None, [2, 0, 1], None)
+    expected = (
+        torch.empty(2, 0, device=gems.device)
+        if all_empty
+        else torch.tensor([[14, 20], [38, 36]], dtype=torch.float32, device=gems.device)
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

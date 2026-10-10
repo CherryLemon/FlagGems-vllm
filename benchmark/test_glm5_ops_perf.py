@@ -219,10 +219,13 @@ def _make_case(family, rows, dim):
         bias = torch.randn(dim, dtype=x.dtype, device=device)
 
         def conv_ref():
-            window = torch.cat((state.float(), x.float().unsqueeze(-1)), dim=-1)
+            window = torch.cat(
+                (state[..., :3].float(), x.to(state.dtype).float().unsqueeze(-1)),
+                dim=-1,
+            )
             value = (window * weight.float().unsqueeze(0)).sum(-1) + bias.float()
-            state.copy_(window[..., 1:].to(state.dtype))
-            return F.silu(value).to(x.dtype)
+            state[..., :3].copy_(window[..., 1:].to(state.dtype))
+            return F.silu(value).to(state.dtype).to(x.dtype)
 
         def reset_state():
             state.copy_(state_initial)

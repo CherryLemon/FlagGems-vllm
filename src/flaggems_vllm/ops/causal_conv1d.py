@@ -48,12 +48,14 @@ def _conv_kernel(
     j = tl.arange(0, BW)
     start = tl.load(CU + req) if VARLEN else 0
     end = tl.load(CU + req + 1) if VARLEN else T
+    if start == end:
+        return
     slot = tl.load(SLOTS + req) if HAS_SLOTS else req
     valid = (slot >= 0) & (slot != PAD) & (slot != NULL)
     use_state = tl.load(INITIAL + req) if HAS_INITIAL else True
     st_base = STATE + slot * SS_REQ + channel[:, None] * SS_D
     history = tl.load(
-        st_base + (HISTORY - WIDTH + 1 + j[None, :]) * SS_T,
+        st_base + j[None, :] * SS_T,
         (channel[:, None] < D) & (j[None, :] < WIDTH - 1) & valid & use_state,
         other=0,
     ).to(tl.float32)
@@ -73,6 +75,7 @@ def _conv_kernel(
             result += tl.load(BIAS + channel, channel < D, other=0).to(tl.float32)
         if SILU:
             result = result / (1.0 + tl.exp(-result))
+        result = result.to(STATE.dtype.element_ty)
         tl.store(
             OUT + req * SO_REQ + channel * SO_D + token * SO_T,
             tl.where(valid, result, 0),
@@ -81,7 +84,7 @@ def _conv_kernel(
         nxt = tl.broadcast_to(((j + 1) % BW)[None, :], (BLOCK_D, BW))
         history = tl.gather(window, nxt, 1)
     tl.store(
-        st_base + (HISTORY - WIDTH + 1 + j[None, :]) * SS_T,
+        st_base + j[None, :] * SS_T,
         history,
         (channel[:, None] < D) & (j[None, :] < WIDTH - 1) & valid,
     )

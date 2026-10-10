@@ -315,22 +315,24 @@ def _causal_conv_sequence(
     activation: bool | str | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference depthwise causal convolution for one ``[dim, tokens]`` row."""
+    if sequence.shape[-1] == 0:
+        return sequence.new_empty(sequence.shape), state
     width = weight.shape[-1]
-    history = state[..., -(width - 1) :].clone()
+    history = state[..., : width - 1].clone()
     outputs = []
     for token in range(sequence.shape[-1]):
         window = torch.cat((history, sequence[:, token : token + 1]), dim=-1)
         value = (window.float() * weight.float()).sum(dim=-1)
         if bias is not None:
             value = value + bias.float()
-        outputs.append(_apply_causal_conv_activation(value, activation))
+        outputs.append(_apply_causal_conv_activation(value, activation).to(state.dtype))
         history = window[:, 1:]
     if outputs:
         output = torch.stack(outputs, dim=-1).to(sequence.dtype)
     else:
         output = sequence.new_empty(sequence.shape)
     next_state = state.clone()
-    next_state[..., -(width - 1) :] = history.to(next_state.dtype)
+    next_state[..., : width - 1] = history.to(next_state.dtype)
     return output, next_state
 
 
@@ -377,6 +379,8 @@ def causal_conv1d_fn(
     boundaries = query_start_loc.detach().to("cpu", torch.int64).tolist()
     output = torch.empty_like(x)
     for request, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+        if start == end:
+            continue
         state_id = (
             request if cache_indices is None else int(cache_indices[request].item())
         )
@@ -384,11 +388,9 @@ def causal_conv1d_fn(
             output[:, start:end].zero_()
             continue
         use_state = has_initial_state is None or bool(has_initial_state[request].item())
-        state = (
-            conv_states[state_id]
-            if use_state
-            else torch.zeros_like(conv_states[state_id])
-        )
+        state = conv_states[state_id].clone()
+        if not use_state:
+            state[..., : weight.shape[-1] - 1].zero_()
         request_output, next_state = _causal_conv_sequence(
             x[:, start:end].to(conv_states.dtype),
             state,
@@ -437,6 +439,8 @@ def causal_conv1d_update(
         boundaries = query_start_loc.detach().to("cpu", torch.int64).tolist()
         output = torch.empty_like(x)
         for request, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+            if start == end:
+                continue
             state_id = int(conv_state_indices[request].item())
             if state_id == null_block_id or state_id < 0:
                 output[start:end].zero_()
@@ -458,6 +462,8 @@ def causal_conv1d_update(
         raise ValueError("Decode causal-conv input must be [batch, dim, tokens]")
     output = torch.empty_like(x_3d)
     for request in range(x_3d.shape[0]):
+        if x_3d.shape[-1] == 0:
+            continue
         state_id = (
             request
             if conv_state_indices is None
