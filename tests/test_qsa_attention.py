@@ -293,3 +293,132 @@ def test_sparse_graph_replay_changes_inputs():
     expected = torch.empty_like(case["q"])
     _run(ops, case, expected)
     _assert_split_error(out, expected)
+
+
+def _strided_request_mapping(case):
+    rows = case["q"].shape[0]
+    storage = torch.full((rows * 3,), -1, dtype=torch.int32, device=case["q"].device)
+    mapping = storage[1::3]
+    mapping.copy_(case["token_to_req"].flip(0))
+    mapping[1] = -1
+    assert mapping.stride(0) == 3 and mapping.storage_offset() == 1
+    case["token_to_req"] = mapping
+
+
+def _guarded_stat_workspace(case, splits, layout):
+    rows, heads, _ = case["q"].shape
+    strides = {
+        "contiguous": (heads * splits, splits, 1),
+        "padded": (heads * splits * 8, splits * 4, 2),
+        "transposed": (splits, rows * splits, 1),
+    }[layout]
+    # Retain ample guard storage even for the old, incorrect max-stride writes,
+    # so the regression fails an assertion rather than corrupting another allocation.
+    sentinel = -12345.0
+    storage = torch.full(
+        ((rows + 1) * heads * splits * 16,),
+        sentinel,
+        dtype=torch.float32,
+        device=case["q"].device,
+    )
+    view = storage.as_strided((rows, heads, splits), strides, storage_offset=7)
+    offsets = (
+        7
+        + torch.arange(rows, device=storage.device)[:, None, None] * strides[0]
+        + torch.arange(heads, device=storage.device)[None, :, None] * strides[1]
+        + torch.arange(splits, device=storage.device)[None, None, :] * strides[2]
+    )
+    guard = torch.ones(storage.numel(), dtype=torch.bool, device=storage.device)
+    guard[offsets.flatten()] = False
+    return view, storage, guard, sentinel
+
+
+def _assert_reference_output(case, out):
+    ref = qsa_sparse_paged_attention_reference(
+        case["q"],
+        case["k"],
+        case["v"],
+        case["indices"],
+        case["table"],
+        case["token_to_req"],
+    )
+    ref = ref * torch.sigmoid(case["gate"])
+    torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("splits", [1, 8])
+def test_sparse_strided_request_mapping_matches_reference(dtype, splits):
+    case = _case(torch.device("cuda"), rows=4, topk=33, head_dim=64)
+    for name in ("q", "k", "v", "gate"):
+        case[name] = case[name].to(dtype)
+    _strided_request_mapping(case)
+    workspace = _workspace(case, splits) if splits > 1 else None
+    out = torch.empty_like(case["q"])
+    _run(ops, case, out, workspace=workspace)
+    _assert_reference_output(case, out)
+    assert torch.count_nonzero(out[1]) == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("splits", [2, 8])
+@pytest.mark.parametrize(
+    "max_layout,sum_layout",
+    [("padded", "contiguous"), ("contiguous", "padded"), ("padded", "transposed")],
+)
+def test_sparse_independent_stat_strides_preserve_guards(
+    dtype, splits, max_layout, sum_layout
+):
+    case = _case(torch.device("cuda"), rows=4, topk=33, head_dim=64)
+    for name in ("q", "k", "v", "gate"):
+        case[name] = case[name].to(dtype)
+    partial_output, _, _ = _workspace(case, splits)
+    max_view, max_storage, max_guard, sentinel = _guarded_stat_workspace(
+        case, splits, max_layout
+    )
+    sum_view, sum_storage, sum_guard, _ = _guarded_stat_workspace(
+        case, splits, sum_layout
+    )
+    assert max_view.stride() != sum_view.stride()
+    out = torch.empty_like(case["q"])
+    _run(ops, case, out, workspace=(partial_output, max_view, sum_view))
+    torch.cuda.synchronize()
+    assert torch.all(max_storage[max_guard] == sentinel)
+    assert torch.all(sum_storage[sum_guard] == sentinel)
+    _assert_reference_output(case, out)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_sparse_strided_metadata_and_stats_graph_replay(dtype):
+    case = _case(torch.device("cuda"), rows=4, topk=33, head_dim=64)
+    for name in ("q", "k", "v", "gate"):
+        case[name] = case[name].to(dtype)
+    _strided_request_mapping(case)
+    splits = 8
+    partial_output, _, _ = _workspace(case, splits)
+    max_view, max_storage, max_guard, sentinel = _guarded_stat_workspace(
+        case, splits, "padded"
+    )
+    sum_view, sum_storage, sum_guard, _ = _guarded_stat_workspace(
+        case, splits, "transposed"
+    )
+    workspace = (partial_output, max_view, sum_view)
+    out = torch.empty_like(case["q"])
+    for _ in range(3):
+        _run(ops, case, out, workspace=workspace)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        _run(ops, case, out, workspace=workspace)
+    case["q"].copy_(torch.randn_like(case["q"]))
+    case["gate"].copy_(torch.randn_like(case["gate"]))
+    case["token_to_req"].copy_(
+        torch.arange(case["q"].shape[0], dtype=torch.int32, device=out.device)
+    )
+    out.fill_(float("nan"))
+    max_view.fill_(float("nan"))
+    sum_view.fill_(float("nan"))
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.all(max_storage[max_guard] == sentinel)
+    assert torch.all(sum_storage[sum_guard] == sentinel)
+    _assert_reference_output(case, out)

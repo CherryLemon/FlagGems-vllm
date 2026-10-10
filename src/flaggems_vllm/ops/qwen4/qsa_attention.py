@@ -93,6 +93,7 @@ def _qsa_sparse_paged_gqa_kernel(
     stride_indices_column,
     stride_table_req,
     stride_table_page,
+    stride_token_to_req,
     stride_gate_row,
     stride_gate_head,
     stride_gate_dim,
@@ -116,7 +117,7 @@ def _qsa_sparse_paged_gqa_kernel(
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
-    request = tl.load(token_to_req_ptr + row)
+    request = tl.load(token_to_req_ptr + row * stride_token_to_req)
     head_offsets = tl.arange(0, BLOCK_M)
     dim_offsets = tl.arange(0, BLOCK_D)
     first_head = kv_head * GROUP_SIZE
@@ -254,13 +255,17 @@ def _qsa_sparse_paged_gqa_split_kernel(
     stride_indices_column,
     stride_table_req,
     stride_table_page,
+    stride_token_to_req,
     stride_partial_output_row,
     stride_partial_output_head,
     stride_partial_output_split,
     stride_partial_output_dim,
-    stride_partial_stat_row,
-    stride_partial_stat_head,
-    stride_partial_stat_split,
+    stride_partial_max_row,
+    stride_partial_max_head,
+    stride_partial_max_split,
+    stride_partial_sum_row,
+    stride_partial_sum_head,
+    stride_partial_sum_split,
     num_rows,
     num_cache_blocks,
     num_requests,
@@ -287,7 +292,7 @@ def _qsa_sparse_paged_gqa_split_kernel(
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
     split = tl.program_id(2)
-    request = tl.load(token_to_req_ptr + row)
+    request = tl.load(token_to_req_ptr + row * stride_token_to_req)
     head_offsets = tl.arange(0, BLOCK_M)
     dim_offsets = tl.arange(0, BLOCK_D)
     first_head = kv_head * GROUP_SIZE
@@ -371,14 +376,19 @@ def _qsa_sparse_paged_gqa_split_kernel(
         max_value = next_max
 
     query_heads = first_head + head_offsets
-    stat_offsets = (
-        row * stride_partial_stat_row
-        + query_heads * stride_partial_stat_head
-        + split * stride_partial_stat_split
+    max_offsets = (
+        row * stride_partial_max_row
+        + query_heads * stride_partial_max_head
+        + split * stride_partial_max_split
+    )
+    sum_offsets = (
+        row * stride_partial_sum_row
+        + query_heads * stride_partial_sum_head
+        + split * stride_partial_sum_split
     )
     stat_mask = (row < num_rows) & (head_offsets < GROUP_SIZE)
-    tl.store(partial_max_ptr + stat_offsets, max_value, mask=stat_mask)
-    tl.store(partial_sum_ptr + stat_offsets, normalizer, mask=stat_mask)
+    tl.store(partial_max_ptr + max_offsets, max_value, mask=stat_mask)
+    tl.store(partial_sum_ptr + sum_offsets, normalizer, mask=stat_mask)
     output_offsets = (
         row * stride_partial_output_row
         + query_heads[:, None] * stride_partial_output_head
@@ -403,9 +413,12 @@ def _qsa_sparse_paged_gqa_split_reduce_kernel(
     stride_partial_output_head,
     stride_partial_output_split,
     stride_partial_output_dim,
-    stride_partial_stat_row,
-    stride_partial_stat_head,
-    stride_partial_stat_split,
+    stride_partial_max_row,
+    stride_partial_max_head,
+    stride_partial_max_split,
+    stride_partial_sum_row,
+    stride_partial_sum_head,
+    stride_partial_sum_split,
     stride_gate_row,
     stride_gate_head,
     stride_gate_dim,
@@ -427,15 +440,18 @@ def _qsa_sparse_paged_gqa_split_reduce_kernel(
     split_offsets = tl.arange(0, BLOCK_S)
     dim_offsets = tl.arange(0, BLOCK_D)
     split_mask = split_offsets < NUM_SPLITS
-    stat_offsets = (
-        row * stride_partial_stat_row
-        + query_head * stride_partial_stat_head
-        + split_offsets * stride_partial_stat_split
+    max_offsets = (
+        row * stride_partial_max_row
+        + query_head * stride_partial_max_head
+        + split_offsets * stride_partial_max_split
     )
-    partial_max = tl.load(
-        partial_max_ptr + stat_offsets, mask=split_mask, other=-1.0e20
+    sum_offsets = (
+        row * stride_partial_sum_row
+        + query_head * stride_partial_sum_head
+        + split_offsets * stride_partial_sum_split
     )
-    partial_sum = tl.load(partial_sum_ptr + stat_offsets, mask=split_mask, other=0.0)
+    partial_max = tl.load(partial_max_ptr + max_offsets, mask=split_mask, other=-1.0e20)
+    partial_sum = tl.load(partial_sum_ptr + sum_offsets, mask=split_mask, other=0.0)
     global_max = tl.max(partial_max, axis=0)
     split_scale = tl.math.exp2(partial_max - global_max)
     denominator = tl.sum(partial_sum * split_scale, axis=0)
@@ -545,6 +561,7 @@ def _qsa_sparse_paged_attention_split(
         logical_indices.stride(1),
         block_table.stride(0),
         block_table.stride(1),
+        token_to_req.stride(0),
         partial_output.stride(0),
         partial_output.stride(1),
         partial_output.stride(2),
@@ -552,6 +569,9 @@ def _qsa_sparse_paged_attention_split(
         partial_max.stride(0),
         partial_max.stride(1),
         partial_max.stride(2),
+        partial_sum.stride(0),
+        partial_sum.stride(1),
+        partial_sum.stride(2),
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
@@ -583,6 +603,9 @@ def _qsa_sparse_paged_attention_split(
         partial_max.stride(0),
         partial_max.stride(1),
         partial_max.stride(2),
+        partial_sum.stride(0),
+        partial_sum.stride(1),
+        partial_sum.stride(2),
         gate.stride(0) if gate is not None else 0,
         gate.stride(1) if gate is not None else 0,
         gate.stride(2) if gate is not None else 0,
@@ -619,6 +642,7 @@ def qsa_sparse_paged_attention(
     ``split_workspace`` is optional so existing callers keep the ABI.  A
     caller-provided workspace enables the split path; otherwise the single
     kernel runs without temporary allocations. Graph ownership stays with the caller.
+    Request mappings and each workspace tensor use their own strides.
     """
 
     if not _is_triton_device(q):
@@ -698,6 +722,7 @@ def qsa_sparse_paged_attention(
         logical_indices.stride(1),
         block_table.stride(0),
         block_table.stride(1),
+        token_to_req.stride(0),
         gate.stride(0) if gate is not None else 0,
         gate.stride(1) if gate is not None else 0,
         gate.stride(2) if gate is not None else 0,
