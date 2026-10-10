@@ -20,7 +20,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .data_movement import contiguous_copy
+from flaggems_vllm.ops.data_movement import contiguous_copy
 
 logger = logging.getLogger(__name__)
 

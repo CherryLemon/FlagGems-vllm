@@ -7,10 +7,9 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
+from flaggems_vllm.ops.data_movement import contiguous_copy
+from flaggems_vllm.ops.mhc import mhc_post, mhc_pre
 from flaggems_vllm.utils import libentry, libtuner
-
-from .data_movement import contiguous_copy
-from .mhc import mhc_post, mhc_pre
 
 
 @libentry()
@@ -145,7 +144,9 @@ def _broadcast_impl():
 
         if not is_deep_gemm_supported():
             return None
-        from .mhc_broadcast_tilelang import mhc_pre_broadcast_tilelang as impl
+        from flaggems_vllm.ops.mhc_broadcast_tilelang import (
+            mhc_pre_broadcast_tilelang as impl,
+        )
     except (ImportError, OSError):
         return None
     return impl

@@ -22,7 +22,7 @@ bytes to BF16 before MMA, preserving the page format and scale addressing.
 import triton
 import triton.language as tl
 
-from .fp8_storage import decode_e4m3fn
+from flaggems_vllm.ops.fp8_storage import decode_e4m3fn
 
 
 @triton.jit
@@ -149,8 +149,7 @@ def paged_mqa_logits(
     import torch
 
     from flaggems_vllm import runtime
-
-    from .data_movement import fill
+    from flaggems_vllm.ops.data_movement import fill
 
     del schedule_metadata
     values, scale = q

@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from .data_movement import contiguous_copy
+from flaggems_vllm.ops.data_movement import contiguous_copy
 
 # FlashInfer must bind the CUDA runtime before TileLang loads its runtime stub.
 try:

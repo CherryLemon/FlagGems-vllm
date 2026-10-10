@@ -12,7 +12,7 @@ from importlib import import_module
 import torch
 import triton
 
-from .data_movement import fill
+from flaggems_vllm.ops.data_movement import fill
 
 
 def _kernel(module, name, required):

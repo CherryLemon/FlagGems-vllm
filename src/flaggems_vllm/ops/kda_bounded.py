@@ -8,10 +8,14 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
+from flaggems_vllm.ops.data_movement import contiguous_copy, fill
+from flaggems_vllm.ops.kda64 import (
+    _prefill_core,
+    _recurrent_core,
+    prefill_kda64,
+    recurrent_kda_vk,
+)
 from flaggems_vllm.utils import libentry, libtuner
-
-from .data_movement import contiguous_copy, fill
-from .kda64 import _prefill_core, _recurrent_core, prefill_kda64, recurrent_kda_vk
 
 
 @libentry()

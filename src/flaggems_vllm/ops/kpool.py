@@ -9,10 +9,9 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
+from flaggems_vllm.ops.data_movement import contiguous_copy
+from flaggems_vllm.ops.fp8_storage import encode_e4m3fn
 from flaggems_vllm.utils import libentry, libtuner
-
-from .data_movement import contiguous_copy
-from .fp8_storage import encode_e4m3fn
 
 INDEX_HEAD_DIM = 128
 
