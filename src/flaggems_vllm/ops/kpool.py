@@ -376,6 +376,7 @@ def _kpool_tail_seed_kernel(
     n_tokens,
     HEAD_DIM: tl.constexpr,
     KPOOL: tl.constexpr,
+    TAIL_BLOCK_STRIDE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     """Copy token ``i``'s raw K + gate into its request's tail block.
@@ -400,7 +401,7 @@ def _kpool_tail_seed_kernel(
         return
     offs = tl.arange(0, BLOCK_D)
     m = offs < HEAD_DIM
-    base = (blk * 2 * KPOOL + t % KPOOL) * HEAD_DIM
+    base = blk * TAIL_BLOCK_STRIDE + (t % KPOOL) * HEAD_DIM
     k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
     s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
     tl.store(tail_ptr + base + offs, k, mask=m)
@@ -415,7 +416,7 @@ def kpool_seed_tail_cache(
     kpool: int,
     head_dim: int = INDEX_HEAD_DIM,
 ) -> None:
-    """Seed the paged tail cache from a prefill batch (see the kernel)."""
+    """Seed a prefill tail in place, allowing padding between packed pages."""
     if (
         tail_kv_cache.dtype not in (torch.bfloat16, torch.float32)
         or key.dtype != tail_kv_cache.dtype
@@ -430,8 +431,13 @@ def kpool_seed_tail_cache(
         raise ValueError("Tail seed shape mismatch")
     if any(t.device != tail_kv_cache.device for t in (key, gate_score, tslot)):
         raise ValueError("Tail seed inputs must share device")
-    if not tail_kv_cache.is_contiguous():
-        raise ValueError("Tail seed cache must be contiguous")
+    if (
+        tail_kv_cache.stride()[1:] != (kpool * head_dim, head_dim, 1)
+        or tail_kv_cache.stride(0) < 2 * kpool * head_dim
+    ):
+        raise ValueError(
+            "Tail seed cache requires packed inner dimensions and non-overlapping blocks"
+        )
     key, gate_score, tslot = map(contiguous_copy, (key, gate_score, tslot))
     n = tslot.shape[0]
     if n == 0:
@@ -444,6 +450,7 @@ def kpool_seed_tail_cache(
         n,
         HEAD_DIM=head_dim,
         KPOOL=kpool,
+        TAIL_BLOCK_STRIDE=tail_kv_cache.stride(0),
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
 

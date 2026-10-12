@@ -22,6 +22,7 @@ ACTIVE = {
     "gather_state_rows": [1, 128, 17, 256],
     "scatter_state_rows": [1, 128, 17, 256],
     "zero_state_rows": [1, 128, 17, 256],
+    "kpool_tail_seed_padded": [1, 128, 17, 256],
 }
 
 
@@ -108,7 +109,13 @@ def _make_case(family, rows, shape_class):
     pool = 4
     cache = torch.zeros(math.ceil(rows / 32), 32, 132, dtype=torch.uint8, device=device)
     tail_initial = torch.randn(rows, 2, pool, 128, dtype=torch.bfloat16, device=device)
-    tail = tail_initial.clone()
+    if family == "kpool_tail_seed_padded":
+        # Same 16896-byte page as a 512-token, ratio-4 indexer cache;
+        # only the first 2048 bytes belong to this request's tail ring.
+        tail_backing = torch.empty(rows, 8448, dtype=tail_initial.dtype, device=device)
+        tail = tail_backing[:, : 2 * pool * 128].view(rows, 2, pool, 128)
+    else:
+        tail = tail_initial.clone()
     initial_cache = cache.clone()
     keys = torch.randn(rows, pool, 128, dtype=torch.bfloat16, device=device)
     scores = torch.randn_like(keys)
@@ -129,7 +136,7 @@ def _make_case(family, rows, shape_class):
         cache_scales[locations // 32, locations % 32] = scales
 
     def baseline():
-        if family == "kpool_tail_seed":
+        if family in {"kpool_tail_seed", "kpool_tail_seed_padded"}:
             tail[:, 0] = keys
             tail[:, 1] = scores
             return tail
@@ -141,7 +148,7 @@ def _make_case(family, rows, shape_class):
         return cache
 
     def candidate():
-        if family == "kpool_tail_seed":
+        if family in {"kpool_tail_seed", "kpool_tail_seed_padded"}:
             gems.kpool_seed_tail_cache(
                 tail, keys.flatten(0, 1), scores.flatten(0, 1), tail_slots, pool
             )

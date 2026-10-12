@@ -28,11 +28,15 @@ import math
 import pytest
 import torch
 
+import flaggems_vllm.ops.kpool as kpool_ops
 from flaggems_vllm import device
 from flaggems_vllm.ops.kpool import (
     kpool_compress_and_write_cache,
     kpool_decode_update_and_maybe_write_cache_batched,
+    kpool_seed_tail_cache,
 )
+
+from . import glm5_reference
 
 pytestmark = pytest.mark.gpu
 
@@ -468,3 +472,326 @@ def test_batched_matches_reference_fuzz(seed):
     r_ref = _torch_reference(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     r_kern = _run_kernel(kv, tail, tail_slot, key, score, ape, slot_map, pos)
     _assert_eq(r_ref, r_kern)
+
+
+def _tail_view(backing, num_blocks, pool_size, head_dim, page_stride, offset):
+    return torch.as_strided(
+        backing,
+        (num_blocks, 2, pool_size, head_dim),
+        (page_stride, pool_size * head_dim, head_dim, 1),
+        storage_offset=offset,
+    )
+
+
+def _tail_storage(pool_size, head_dim, dtype, *, padded=True):
+    num_blocks = 8
+    payload = 2 * pool_size * head_dim
+    # A sibling cache occupies the gap between consecutive tail pages. Prefix
+    # and suffix guards also detect addressing relative to the wrong base.
+    page_stride = 2 * payload + 37 if padded else payload
+    offset = 17 if padded else 0
+    backing = (
+        torch.arange(
+            offset + num_blocks * page_stride + 23,
+            dtype=torch.int32,
+            device=DEVICE,
+        )
+        .remainder(97)
+        .sub(48)
+        .to(dtype)
+    )
+    tail = _tail_view(backing, num_blocks, pool_size, head_dim, page_stride, offset)
+    return backing, tail
+
+
+def _same_tail_view(backing, tail):
+    return torch.as_strided(
+        backing, tail.shape, tail.stride(), storage_offset=tail.storage_offset()
+    )
+
+
+def _seed_fixture(pool_size, head_dim, dtype, *, blocks=(1, 3, 6), refresh=0):
+    lengths = (2 * pool_size + 1, pool_size - 1, 3 * pool_size + 2)
+    slots = [-1, -1]
+    for block, length in zip(blocks, lengths):
+        slots.extend(block * pool_size + pos % pool_size for pos in range(length))
+    slots.extend([-1, -1, -1])
+    slots = torch.tensor(slots, dtype=torch.int32, device=DEVICE)
+    elements = torch.arange(
+        slots.numel() * head_dim, dtype=torch.int32, device=DEVICE
+    ).reshape(-1, head_dim)
+    key = ((elements + 7 * refresh).remainder(31) - 15).to(dtype) / 16
+    score = ((elements + 3 * refresh).remainder(17) - 8).to(dtype) / 8
+    # Seed is a copy operation: equality includes the sign bit of zero.
+    key[:, 0] = -0.0
+    score[:, 0] = 0.0
+    return key, score, slots
+
+
+def _assert_storage_exact(actual, expected):
+    assert torch.equal(
+        actual.view(torch.uint8), expected.view(torch.uint8)
+    ), "tail backing differs, including untouched sibling/padding/guard bytes"
+
+
+def _tail_identity(tail):
+    return (
+        tail.data_ptr(),
+        tail.untyped_storage().data_ptr(),
+        tail.storage_offset(),
+        tail.stride(),
+    )
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("head_dim", [128, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("padded", [False, True], ids=["contiguous", "padded-offset"])
+def test_seed_tail_pages_match_reference_exact(pool_size, head_dim, dtype, padded):
+    backing, tail = _tail_storage(pool_size, head_dim, dtype, padded=padded)
+    assert tail.is_contiguous() != padded
+    expected = backing.clone()
+    reference_tail = _same_tail_view(expected, tail)
+    key, score, slots = _seed_fixture(pool_size, head_dim, dtype)
+    identity = _tail_identity(tail)
+
+    glm5_reference.kpool_seed_tail_cache(
+        reference_tail, key, score, slots, pool_size, head_dim
+    )
+    kpool_seed_tail_cache(tail, key, score, slots, pool_size, head_dim)
+
+    _assert_storage_exact(backing, expected)
+    assert _tail_identity(tail) == identity
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+def test_seed_padded_tail_then_decode_matches_contiguous_and_reference(pool_size):
+    backing, tail = _tail_storage(pool_size, HEAD_DIM, torch.bfloat16)
+    expected = backing.clone()
+    reference_tail = _same_tail_view(expected, tail)
+    contiguous_tail = tail.clone()
+    blocks = (1, 3, 6)
+    lengths = (2 * pool_size + 1, 2 * pool_size - 1, 3 * pool_size + 2)
+    seed_slots = []
+    seed_keys = []
+    for request, (block, length) in enumerate(zip(blocks, lengths)):
+        seed_slots.extend(block * pool_size + pos % pool_size for pos in range(length))
+        # Constant keys per request make the independent reference's FP8
+        # result exact without changing any existing numerical tolerances.
+        seed_keys.append(
+            torch.full(
+                (length, HEAD_DIM),
+                0.5 * 2**request,
+                dtype=torch.bfloat16,
+                device=DEVICE,
+            )
+        )
+    seed_slots = torch.tensor(seed_slots, dtype=torch.int32, device=DEVICE)
+    seed_key = torch.cat(seed_keys)
+    seed_score = torch.zeros_like(seed_key)
+    glm5_reference.kpool_seed_tail_cache(
+        reference_tail, seed_key, seed_score, seed_slots, pool_size, HEAD_DIM
+    )
+    for destination in (tail, contiguous_tail):
+        kpool_seed_tail_cache(
+            destination, seed_key, seed_score, seed_slots, pool_size, HEAD_DIM
+        )
+    _assert_storage_exact(backing, expected)
+    assert torch.equal(tail, contiguous_tail)
+
+    next_n = pool_size + 2
+    positions = torch.tensor(
+        [[start + token for token in range(next_n)] for start in lengths],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    # A shorter request must leave its padded tokens and cache slots untouched.
+    positions[1, -3:] = -1
+    block_ids = torch.tensor(blocks, dtype=torch.int32, device=DEVICE).unsqueeze(1)
+    tail_slots = torch.where(
+        positions >= 0, block_ids * pool_size + positions % pool_size, -1
+    )
+    cache_slots = torch.where(
+        (positions >= 0) & (positions % pool_size == pool_size - 1),
+        torch.arange(3, dtype=torch.int32, device=DEVICE).unsqueeze(1) * PAGE_SIZE
+        + positions // pool_size,
+        -1,
+    )
+    key = torch.stack(
+        [
+            torch.full(
+                (next_n, HEAD_DIM),
+                0.5 * 2**request,
+                dtype=torch.bfloat16,
+                device=DEVICE,
+            )
+            for request in range(3)
+        ]
+    )
+    score = torch.zeros_like(key)
+    ape = torch.zeros(pool_size, HEAD_DIM, dtype=torch.float32, device=DEVICE)
+    kv = torch.full((8, PAGE_SIZE, HEAD_DIM + 4), 173, dtype=torch.uint8, device=DEVICE)
+    reference_kv = kv.clone()
+    contiguous_kv = kv.clone()
+    glm5_reference.kpool_decode_update_and_maybe_write_cache_batched(
+        reference_kv,
+        reference_tail,
+        tail_slots,
+        key,
+        score,
+        ape,
+        cache_slots,
+        positions,
+        pool_size,
+        HEAD_DIM,
+        round_scale=ROUND_SCALE,
+    )
+    for destination_kv, destination_tail in (
+        (kv, tail),
+        (contiguous_kv, contiguous_tail),
+    ):
+        kpool_decode_update_and_maybe_write_cache_batched(
+            destination_kv,
+            destination_tail,
+            tail_slots,
+            key,
+            score,
+            ape,
+            cache_slots,
+            positions,
+            pool_size,
+            HEAD_DIM,
+            round_scale=ROUND_SCALE,
+        )
+
+    assert torch.equal(kv, contiguous_kv)
+    assert torch.equal(kv, reference_kv)
+    assert torch.equal(tail, contiguous_tail)
+    _assert_storage_exact(backing, expected)
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_seed_padded_tail_graph_replay_refreshes_inputs(pool_size, dtype):
+    backing, tail = _tail_storage(pool_size, HEAD_DIM, dtype)
+    key, score, slots = _seed_fixture(pool_size, HEAD_DIM, dtype)
+    identity = _tail_identity(tail)
+    stream = torch.cuda.Stream(device=DEVICE)
+    stream.wait_stream(torch.cuda.current_stream(device=DEVICE))
+    with torch.cuda.stream(stream):
+        for _ in range(2):
+            kpool_seed_tail_cache(tail, key, score, slots, pool_size, HEAD_DIM)
+    torch.cuda.current_stream(device=DEVICE).wait_stream(stream)
+    torch.cuda.synchronize(device=DEVICE)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        kpool_seed_tail_cache(tail, key, score, slots, pool_size, HEAD_DIM)
+
+    for refresh, blocks in enumerate(((6, 3, 1), (3, 1, 6)), start=1):
+        new_key, new_score, new_slots = _seed_fixture(
+            pool_size, HEAD_DIM, dtype, blocks=blocks, refresh=refresh
+        )
+        key.copy_(new_key)
+        score.copy_(new_score)
+        slots.copy_(new_slots)
+        # Pollute every output and sibling byte outside the captured graph.
+        backing.fill_(-32 - refresh)
+        expected = backing.clone()
+        glm5_reference.kpool_seed_tail_cache(
+            _same_tail_view(expected, tail),
+            key,
+            score,
+            slots,
+            pool_size,
+            HEAD_DIM,
+        )
+        graph.replay()
+        torch.cuda.synchronize(device=DEVICE)
+        _assert_storage_exact(backing, expected)
+        assert _tail_identity(tail) == identity
+
+
+class _ForbiddenSeedLaunch:
+    def __init__(self):
+        self.attempts = 0
+
+    def __getitem__(self, grid):
+        self.attempts += 1
+        raise AssertionError(f"seed kernel launch attempted with grid={grid}")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(
+    "layout",
+    ["strided-head", "strided-pool", "strided-plane", "overlap", "broadcast"],
+)
+def test_seed_invalid_tail_layout_rejected_before_launch(monkeypatch, dtype, layout):
+    pool_size = 4
+    backing, valid_tail = _tail_storage(pool_size, HEAD_DIM, dtype)
+    key, score, slots = _seed_fixture(pool_size, HEAD_DIM, dtype)
+    # Establish that this same shape/dtype/device/input batch is supported.
+    expected = backing.clone()
+    glm5_reference.kpool_seed_tail_cache(
+        _same_tail_view(expected, valid_tail),
+        key,
+        score,
+        slots,
+        pool_size,
+        HEAD_DIM,
+    )
+    kpool_seed_tail_cache(valid_tail, key, score, slots, pool_size, HEAD_DIM)
+    _assert_storage_exact(backing, expected)
+
+    strides = list(valid_tail.stride())
+    if layout == "strided-head":
+        strides[3] = 2
+    elif layout == "strided-pool":
+        strides[2] += 1
+    elif layout == "strided-plane":
+        strides[1] += 1
+    elif layout == "overlap":
+        strides[0] = 2 * pool_size * HEAD_DIM - 1
+    else:
+        strides[0] = 0
+    invalid_tail = torch.as_strided(
+        backing,
+        valid_tail.shape,
+        tuple(strides),
+        storage_offset=valid_tail.storage_offset(),
+    )
+    before = backing.clone()
+    forbidden = _ForbiddenSeedLaunch()
+    monkeypatch.setattr(kpool_ops, "_kpool_tail_seed_kernel", forbidden)
+    with pytest.raises(ValueError, match="packed inner|non-overlapping"):
+        kpool_seed_tail_cache(invalid_tail, key, score, slots, pool_size, HEAD_DIM)
+    assert forbidden.attempts == 0
+    _assert_storage_exact(backing, before)
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_seed_empty_padded_tail_returns_without_launch(monkeypatch, pool_size, dtype):
+    backing, tail = _tail_storage(pool_size, HEAD_DIM, dtype)
+    before = backing.clone()
+    key = torch.empty(0, HEAD_DIM, dtype=dtype, device=DEVICE)
+    score = torch.empty_like(key)
+    slots = torch.empty(0, dtype=torch.int32, device=DEVICE)
+    forbidden = _ForbiddenSeedLaunch()
+    monkeypatch.setattr(kpool_ops, "_kpool_tail_seed_kernel", forbidden)
+    kpool_seed_tail_cache(tail, key, score, slots, pool_size, HEAD_DIM)
+    assert forbidden.attempts == 0
+    _assert_storage_exact(backing, before)
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_seed_all_negative_slots_preserve_padded_tail(pool_size, dtype):
+    backing, tail = _tail_storage(pool_size, HEAD_DIM, dtype)
+    expected = backing.clone()
+    key, score, slots = _seed_fixture(pool_size, HEAD_DIM, dtype)
+    slots.fill_(-1)
+    glm5_reference.kpool_seed_tail_cache(
+        _same_tail_view(expected, tail), key, score, slots, pool_size, HEAD_DIM
+    )
+    kpool_seed_tail_cache(tail, key, score, slots, pool_size, HEAD_DIM)
+    _assert_storage_exact(backing, expected)
