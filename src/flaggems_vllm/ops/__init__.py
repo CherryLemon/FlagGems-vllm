@@ -88,6 +88,7 @@ from flaggems_vllm.ops.mhc import (
     sinkhorn_forward,
 )
 from flaggems_vllm.ops.qwen4 import (
+    ple_short_conv_,
     ple_gate_norm,
     ple_gate_norm_,
     ple_prefill_short_conv_,
@@ -177,6 +178,7 @@ from flaggems_vllm.ops.vit_attention import (
 )
 
 __all__ = [
+    "ple_short_conv_",
     "qwen4_hc_combine_norm",
     "ple_gate_norm_",
     "ple_gate_norm",
