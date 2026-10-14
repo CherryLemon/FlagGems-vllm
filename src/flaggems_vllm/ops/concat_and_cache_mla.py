@@ -126,8 +126,12 @@ class ConcatAndCacheMla(torch.autograd.Function):
             torch.int64,
         ):
             raise ValueError("MLA cache input dtype mismatch")
-        if kv_cache.shape[-1] != kv_c.shape[-1] + k_pe.shape[-1] or any(
-            t.stride(-1) != 1 for t in (kv_c, k_pe, kv_cache, slot_mapping)
+        # Compiled zero-width RoPE views can have zero strides. The kernel
+        # never accesses that empty section; nonempty inputs keep their guards.
+        if (
+            kv_cache.shape[-1] != kv_c.shape[-1] + k_pe.shape[-1]
+            or any(t.stride(-1) != 1 for t in (kv_c, kv_cache, slot_mapping))
+            or (k_pe.shape[-1] > 0 and k_pe.stride(-1) != 1)
         ):
             raise ValueError(
                 "MLA cache requires matching contiguous feature dimensions"
