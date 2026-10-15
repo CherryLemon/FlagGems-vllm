@@ -27,6 +27,7 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
+from flaggems_vllm.utils import libentry, libtuner
 from flaggems_vllm.utils.triton_version_utils import has_triton_tle
 
 _LAUNCH_GEOMETRY = None
@@ -1338,6 +1339,18 @@ def tle_top_k_per_row_decode(
     )
 
 
+def _standard_topk_entry(kernel):
+    if runtime.device.vendor_name != "nvidia":
+        return kernel
+    return libentry()(
+        libtuner(
+            configs=runtime.get_tuned_config("top_k_per_row_standard"),
+            key=["NUM_ROWS", "vocab_size", "TOPK", "stride0", "stride1"],
+        )(kernel)
+    )
+
+
+@_standard_topk_entry
 @triton.jit
 def non_tle_top_k_per_row_decode(
     logits_ptr,
@@ -1353,6 +1366,7 @@ def non_tle_top_k_per_row_decode(
     s_threshold_bin_idx_ptr,
     s_final_bin_size_ptr,
     s_found_topk_values_ptr,
+    NUM_ROWS: tl.constexpr,
     TOPK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     CANONICAL_OUTPUT: tl.constexpr,
@@ -1529,6 +1543,11 @@ def top_k_per_row_decode(
         s_found_topk_values_ptr = torch.empty(
             (num_rows,), device=device, dtype=torch.int32
         )
+        launch_options = (
+            {}
+            if runtime.device.vendor_name == "nvidia"
+            else {"num_warps": _num_warps(NUM_THREADS_PER_BLOCK)}
+        )
         non_tle_top_k_per_row_decode[(num_rows,)](
             logits,
             indices,
@@ -1546,5 +1565,6 @@ def top_k_per_row_decode(
             TOPK=top_k,
             BLOCK_SIZE=NUM_THREADS_PER_BLOCK,
             CANONICAL_OUTPUT=vocab_size >= CANONICAL_OUTPUT_VOCAB_THRESHOLD,
-            num_warps=_num_warps(NUM_THREADS_PER_BLOCK),
+            NUM_ROWS=num_rows,
+            **launch_options,
         )
