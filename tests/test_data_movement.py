@@ -140,9 +140,9 @@ def test_concat_query_strided_inputs_and_zero_rope(dtype, rope_dim, tokens):
     torch.testing.assert_close(gems.concat_query(a, b), expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "out_stride"])
+@pytest.mark.parametrize("invalid", ["shape", "dtype", "device", "alias"])
 def test_concat_preflight_does_not_modify_output(invalid, monkeypatch):
-    module = importlib.import_module("flaggems_vllm.ops.data_movement")
+    module = importlib.import_module("flaggems_vllm.ops.concat_mla_q")
     calls = []
 
     class RejectLaunch:
@@ -150,7 +150,7 @@ def test_concat_preflight_does_not_modify_output(invalid, monkeypatch):
             calls.append(grid)
             raise AssertionError("invalid concatenation launched")
 
-    monkeypatch.setattr(module, "_concat_query_kernel", RejectLaunch())
+    monkeypatch.setattr(module, "_concat_mla_q_kernel", RejectLaunch())
     a = torch.ones(3, 2, 9, device=DEVICE)
     b = torch.ones(3, 2, 7, device=DEVICE)
     out = torch.full((3, 2, 16), 123.0, device=DEVICE)
@@ -161,7 +161,7 @@ def test_concat_preflight_does_not_modify_output(invalid, monkeypatch):
     elif invalid == "device":
         b = b.cpu()
     else:
-        out = torch.full((3, 2, 32), 123.0, device=DEVICE)[..., ::2]
+        a = out[..., :9]
     before = out.clone()
     with pytest.raises(ValueError):
         gems.concat_mla_q(a, b, out)

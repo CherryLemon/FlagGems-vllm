@@ -989,3 +989,17 @@ top_k_per_row_standard:
   - META: {}
     num_warps: 16
     num_stages: 3
+
+concat_mla_q:
+  - META: {BLOCK: 128}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK: 256}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK: 512}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK: 1024}
+    num_warps: 8
+    num_stages: 1

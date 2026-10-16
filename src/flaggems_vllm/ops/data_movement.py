@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from flaggems_vllm import runtime
+from flaggems_vllm.ops.concat_mla_q import concat_mla_q
 from flaggems_vllm.utils import libentry, libtuner
 
 
@@ -276,42 +277,6 @@ def copy_to(x, out):
             x, out, x.numel(), tuple(x.shape), tuple(x.stride())
         )
     return out
-
-
-@libentry()
-@libtuner(configs=runtime.get_tuned_config("glm_data_copy"), key=["N", "DA", "DB"])
-@triton.jit
-def _concat_query_kernel(
-    A, B, Y, N: tl.constexpr, DA: tl.constexpr, DB: tl.constexpr, BLOCK: tl.constexpr
-):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    row, col = i // (DA + DB), i % (DA + DB)
-    left = tl.load(A + row * DA + col, (i < N) & (col < DA), other=0)
-    right = tl.load(B + row * DB + col - DA, (i < N) & (col >= DA), other=0)
-    tl.store(Y + i, tl.where(col < DA, left, right), i < N)
-
-
-def concat_mla_q(ql_nope, q_pe, q_out):
-    if ql_nope.shape[:-1] != q_pe.shape[:-1] or q_out.shape != (
-        *ql_nope.shape[:-1],
-        ql_nope.shape[-1] + q_pe.shape[-1],
-    ):
-        raise ValueError("MLA query concatenation shape mismatch")
-    if (
-        ql_nope.dtype != q_pe.dtype
-        or q_out.dtype != ql_nope.dtype
-        or ql_nope.device != q_pe.device
-        or q_out.device != ql_nope.device
-    ):
-        raise ValueError("MLA query tensors must share dtype/device")
-    if not q_out.is_contiguous():
-        raise ValueError("MLA query output must be contiguous")
-    a, b = map(contiguous_copy, (ql_nope, q_pe))
-    if q_out.numel():
-        _concat_query_kernel[lambda m: (triton.cdiv(q_out.numel(), m["BLOCK"]),)](
-            a, b, q_out, q_out.numel(), a.shape[-1], b.shape[-1]
-        )
-    return None
 
 
 def concat_query(ql_nope, q_pe):

@@ -19,24 +19,14 @@ import torch
 import triton
 import triton.language as tl
 
+from flaggems_vllm.utils.tle_capabilities import supports_sparse_mla_tle
 from flaggems_vllm.utils.triton_version_utils import has_triton_tle
-
-
-def _has_tle_pipeline_api(module):
-    gpu = getattr(module, "gpu", None)
-    return hasattr(module, "pipe") and all(
-        hasattr(gpu, name)
-        for name in ("alloc", "copy", "local_ptr", "smem", "warp_specialize")
-    )
-
 
 if has_triton_tle(3, 6, 0):
     try:
         import triton.experimental.tle.language as tle
 
-        # Importability alone does not establish the experimental pipeline ABI.
-        # Decide before any allocation/cache mutation; execution failures never retry.
-        HAS_TLE_FLASHMLA_SPARSE = _has_tle_pipeline_api(tle)
+        HAS_TLE_FLASHMLA_SPARSE = supports_sparse_mla_tle(tle)
     except ImportError:
         tle = None
         HAS_TLE_FLASHMLA_SPARSE = False
