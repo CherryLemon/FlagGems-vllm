@@ -49,3 +49,16 @@ def test_geglu(shape, dtype):
     with flaggems_vllm.use_gems():
         res_out = flaggems_vllm.geglu(input_tensor)
     utils.gems_assert_close(res_out, ref_out, dtype)
+
+
+@pytest.mark.geglu
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(3, 254), (2, 3, 512)])
+def test_geglu_torch_reference(shape, dtype):
+    """Keep math-shim compatibility covered without TransformerEngine."""
+    x = torch.randn(shape, dtype=dtype, device=flaggems_vllm.device)
+    reference = x.float().detach().requires_grad_(True)
+    a, b = reference.chunk(2, dim=-1)
+    expected = torch.nn.functional.gelu(a, approximate="tanh") * b
+    actual = flaggems_vllm.geglu(x)
+    utils.gems_assert_close(actual, expected.to(dtype), dtype)
