@@ -537,3 +537,10 @@ per_token_group_quant_int8:
 indexer_k_quant_and_cache_int8:
   shapes: [[64, 128], [256, 128], [4096, 128]]
   shape_desc: "key rows, head_dim; consecutive full pages"
+
+bmm_w8a8:
+  shapes:
+    - [1, 33, 65, 129]
+    - [2, 64, 128, 256]
+    - [4, 129, 17, 257]
+  shape_desc: "B, M, N, K"
