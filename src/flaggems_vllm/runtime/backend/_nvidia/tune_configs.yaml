@@ -1003,3 +1003,19 @@ concat_mla_q:
   - META: {BLOCK: 1024}
     num_warps: 8
     num_stages: 1
+
+# Integer MMA paths for sparse indexers on Ampere and newer.
+int8_mqa_logits:
+  - META: {BLOCK_M: 16, BLOCK_N: 64, HEAD_BLOCK: 2}
+    num_warps: 4
+    num_stages: 2
+  - META: {BLOCK_M: 32, BLOCK_N: 128, HEAD_BLOCK: 2}
+    num_warps: 4
+    num_stages: 2
+int8_paged_mqa_logits:
+  - META: {BLOCK_N: 64}
+    num_warps: 4
+    num_stages: 1
+  - META: {BLOCK_N: 128}
+    num_warps: 4
+    num_stages: 1
