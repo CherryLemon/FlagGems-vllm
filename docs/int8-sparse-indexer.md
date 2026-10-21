@@ -54,7 +54,9 @@ output element is written on each execution.
 The four functions are exported from `ops` and registered by the top-level
 package's existing callable registrar. Operator markers, test aliases,
 benchmark entries and NVIDIA configurations accompany them. Existing FP8
-kernels are unchanged.
+kernels are unchanged. The shared BF16 sparse MLA dispatcher checks the actual
+GPU capability before selecting TLE descriptor copies: pre-Hopper devices keep
+the generic Triton path even when the TLE Python APIs are installed.
 
 | Path | Dispatch | Tuning |
 | --- | --- | --- |
@@ -100,6 +102,10 @@ empty and partial tiles, leading strides, all supported head counts, page sizes
 replay after changing Q/K, slots, weights, lengths and page mappings. References
 run on CPU; logits use double precision to represent the INT32 dot exactly.
 Quantized values match exactly; logits use `rtol=1e-5, atol=2e-3`.
+The 41 TLE capability regressions also pass, including SM80/86/89 rejection
+and SM90/100 acceptance with complete TLE APIs. Two generic BF16 sparse MLA
+cases (64/128 heads, dimension 576, sink and variable TopK length) pass against
+the existing reference with `FLAGGEMS_FLASHMLA_SPARSE_TLE=0`.
 
 All four kernels also compile for `GPUTarget("cuda",80,32)`. The two dot kernels
 emit signed INT8 MMA and no E4M3/E5M2 instructions. This is a compile check,
