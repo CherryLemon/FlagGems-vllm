@@ -110,10 +110,16 @@ def measure(functions, warmup, inner, rounds, seed):
     result = {}
     for name, values in samples.items():
         ordered = sorted(values)
+
+        def percentile(fraction):
+            position = fraction * (len(ordered) - 1)
+            low, high = math.floor(position), math.ceil(position)
+            return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
         result[name] = dict(
             median_us=statistics.median(values),
-            p10_us=ordered[int(0.1 * (len(values) - 1))],
-            p90_us=ordered[int(0.9 * (len(values) - 1))],
+            p10_us=percentile(0.1),
+            p90_us=percentile(0.9),
             min_us=min(values),
             max_us=max(values),
             samples_us=values,

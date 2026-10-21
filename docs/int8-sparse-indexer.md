@@ -61,8 +61,10 @@ the generic Triton path even when the TLE Python APIs are installed.
 | Path | Dispatch | Tuning |
 | --- | --- | --- |
 | Empty/unsupported | Metadata checks; empty allocation or explicit exception | None |
-| Query/cache quantization | One independent 128-element reduction per program | Fixed four warps; explicit exemption because group width and reduction schedule are fixed |
-| Prefill | INT8 tensor-core dot with INT32 accumulation, FP32 epilogue | `int8_mqa_logits`, key `(M,N,H)`; `(BLOCK_M,BLOCK_N,HEAD_BLOCK)=(16,64,2)/(32,128,2)`, four warps, two stages |
+| Small query/cache quantization | One independent 128-element reduction per program | Fixed four warps; fixed-width exemption |
+| At least 1024 query groups | Several independent rows per program, same RNE arithmetic | `per_token_group_quant_int8_batched`, key `(GROUP_COUNT,GROUPS)`; 8/16/32-row blocks, 2/4 warps |
+| Small prefill (`M<=16`) | Row/head dot without padded query rows or serial head-pair loops | `int8_mqa_logits_rows`, key `(M,N,H)`; key tile 32/64/128, four warps, one stage |
+| Dense prefill | INT8 tensor-core dot with INT32 accumulation, FP32 epilogue | `int8_mqa_logits`, key `(M,N,H)`; row/key/head tiles and 1/2/3 stages, retaining original configs |
 | Paged decode | Static row/key grid, live device lengths/page tables | `int8_paged_mqa_logits`, key `(ROWS,CAPACITY,H)`; `BLOCK_N=64/128`, four warps, one stage |
 | Gather/TopK/MLA | Existing public byte-copy, TopK and BF16 MLA operators | Existing configurations |
 
@@ -73,7 +75,7 @@ Production-path audit of `ops/int8_sparse_indexer.py`:
 | `torch.empty` and dtype constants | Uninitialized outputs and metadata validation | No |
 | `shape`, `stride`, `numel`, `is_contiguous`, `device`, `dtype` | Dispatch and pointer geometry | No |
 | `view(torch.float32)`, `unsqueeze` | No-copy cache reinterpretation and rank normalization | No |
-| Triton `_quantize_query`, `_quantize_cache`, `_prefill`, `_decode` | All numerical work | Triton kernels |
+| Triton `_quantize_query`, `_quantize_query_batched`, `_quantize_cache`, `_prefill_rows`, `_prefill`, `_decode` | All numerical work | Triton kernels |
 
 Tests and benchmark baselines alone use Torch rounding, INT32/double dot,
 scaling, ReLU and reduction. Production code imports neither reference.
@@ -96,7 +98,7 @@ PYTHONPATH=src VLLM_PLUGINS=fl CUDA_VISIBLE_DEVICES=0 \
     --level core --iter 30 --warmup 10 --record json --output int8-benchmark.json -q
 ```
 
-The 68 functional cases pass. They cover float input dtypes, RNE ties and zero,
+The 93 functional cases pass. They cover float input dtypes, RNE ties and zero,
 empty and partial tiles, leading strides, all supported head counts, page sizes
 16/64/128, ignored slots, valid-range cleanup, input preservation and graph
 replay after changing Q/K, slots, weights, lengths and page mappings. References
@@ -107,29 +109,21 @@ and SM90/100 acceptance with complete TLE APIs. Two generic BF16 sparse MLA
 cases (64/128 heads, dimension 576, sink and variable TopK length) pass against
 the existing reference with `FLAGGEMS_FLASHMLA_SPARSE_TLE=0`.
 
-All four kernels also compile for `GPUTarget("cuda",80,32)`. The two dot kernels
+All six INT8 kernels also compile for `GPUTarget("cuda",80,32)`. The three dot kernels
 emit signed INT8 MMA and no E4M3/E5M2 instructions. This is a compile check,
 **not A100 execution evidence**. Compute Sanitizer and Nsight Compute were not
 available in the development environment.
 
-The 12 core benchmark shapes all pass the repository's 0.9 speedup threshold
-against their Torch reference. Latency uses CUDA graph timing; the result is
-Torch latency divided by the new kernel latency, with equal weight per shape.
-
-| Operator | Core shapes | Speedup range | Geometric mean |
-| --- | --- | --- | --- |
-| Prefill logits | `(M,N,H)=(1,64,32)/(7,4096,32)/(128,4096,32)` | 1.39–11.40x | 3.20x |
-| Paged logits | `(rows,capacity,H)=(1,64,32)/(7,4096,32)/(32,4096,32)` | 4.60–7.81x | 6.24x |
-| Query quantization | BF16 `[1/32/4096,128]` | 5.29–6.73x | 6.14x |
-| Cache insertion | BF16 `[64/256/4096,128]`, pages of 64 | 7.60–11.00x | 9.62x |
-
-The overall geometric mean is 5.86x. The H100 was shared with other workloads,
-so these timings are development evidence against Torch, not isolated A100
-measurements or a whole-model performance claim. Deep optimization was not
-triggered because all frozen core shapes met the acceptance threshold.
+The four standard Torch-reference benchmark entrypoints remain available.
+The matched [H100 INT8/FP8 report](hy4-int8-h100.md) records 44 component and
+complete-indexer-chain cases, including native DeepGEMM FP8, raw round samples,
+compiled resources, accepted/rejected tuning candidates and comparison limits.
+No Torch numerical fallback is used in any production path. The Torch
+acceptance gate is met; the report additionally compares against FP8 and
+documents the remaining gap to native DeepGEMM on large prefill shapes.
 
 Plugin integration is covered in
-[vllm-plugin-FL #610](https://github.com/flagos-ai/vllm-plugin-FL/pull/610): real
+[vllm-plugin-FL #622](https://github.com/flagos-ai/vllm-plugin-FL/pull/622): real
 INT8 query/cache/gather/logits/TopK composition, refreshed CUDA graph replay and
 opaque full-graph Inductor query quantization. Remaining validation is A100
 execution plus end-to-end checkpoint generation and quality evaluation: changing
