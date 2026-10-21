@@ -118,7 +118,17 @@ def logits_reference(q, k, scales, weights):
 @pytest.mark.int8_mqa_logits
 @pytest.mark.parametrize(
     "m,n,h",
-    [(0, 65, 32), (1, 1, 16), (7, 63, 32), (16, 64, 64), (33, 65, 32), (7, 257, 32)],
+    [
+        (0, 65, 32),
+        (1, 1, 16),
+        (7, 63, 32),
+        (16, 64, 64),
+        (33, 65, 32),
+        (7, 257, 32),
+        (32, 129, 16),
+        (33, 127, 64),
+        (128, 513, 32),
+    ],
 )
 @pytest.mark.parametrize("clean", [False, True])
 def test_prefill_integer_logits(m, n, h, clean):
@@ -224,3 +234,36 @@ def test_paged_graph_refreshed_metadata(page, heads, clean):
 def test_invalid_query_layout_rejected():
     with pytest.raises(NotImplementedError, match="feature stride"):
         gems.per_token_group_quant_int8(torch.empty(2, 256, device="cuda")[:, ::2], 128)
+
+
+@pytest.mark.per_token_group_quant_int8
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("rows,groups", [(1023, 1), (1024, 1), (1025, 2)])
+@pytest.mark.parametrize("ue8m0", [False, True])
+def test_batched_quantization_boundary(dtype, rows, groups, ue8m0):
+    x = torch.randn(rows, groups * 128 + 3, device="cuda", dtype=dtype)[
+        :, : groups * 128
+    ]
+    q, scale = gems.per_token_group_quant_int8(x, 128, use_ue8m0=ue8m0)
+    ref, ref_scale = quant_reference(x, ue8m0=ue8m0)
+    torch.testing.assert_close(q.cpu(), ref, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scale.cpu(), ref_scale.view(rows, groups), rtol=1e-6, atol=0
+    )
+
+
+@pytest.mark.per_token_group_quant_int8
+def test_batched_quantization_graph_refresh():
+    x = torch.randn(1025, 256, device="cuda", dtype=torch.bfloat16)
+    for _ in range(3):
+        gems.per_token_group_quant_int8(x, 128)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        q, scale = gems.per_token_group_quant_int8(x, 128)
+    x.normal_()
+    q.fill_(-128)
+    scale.fill_(float("nan"))
+    graph.replay()
+    ref, ref_scale = quant_reference(x)
+    torch.testing.assert_close(q.cpu(), ref, rtol=0, atol=0)
+    torch.testing.assert_close(scale.cpu(), ref_scale.view(1025, 2), rtol=1e-6, atol=0)

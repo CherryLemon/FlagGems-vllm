@@ -18,10 +18,12 @@ from flaggems_vllm.utils import libentry, libtuner
 @triton.jit
 def _quantize(values, EPS: tl.constexpr, UE8M0: tl.constexpr):
     values = values.to(tl.float32)
-    scale = tl.div_rn(tl.maximum(tl.max(tl.abs(values), 0), EPS), 127.0)
+    scale = tl.div_rn(tl.maximum(tl.max(tl.abs(values), -1), EPS), 127.0)
     if UE8M0:
         scale = tl.exp2(tl.ceil(tl.log2(scale)))
-    x = tl.minimum(tl.maximum(tl.div_rn(values, scale), -127.0), 127.0)
+    x = tl.minimum(
+        tl.maximum(tl.div_rn(values, tl.expand_dims(scale, -1)), -127.0), 127.0
+    )
     lower = tl.floor(x)
     fraction = x - lower
     # Round to nearest, ties to even; no vendor-specific libdevice dependency.
@@ -38,6 +40,37 @@ def _quantize_query(X, Q, S, stride_x, GROUPS: tl.constexpr, UE8M0: tl.constexpr
     quantized, scale = _quantize(values, 1e-10, UE8M0)
     tl.store(Q + group * 128 + d, quantized)
     tl.store(S + group, scale)
+
+
+@libentry()
+@libtuner(
+    configs=runtime.get_tuned_config("per_token_group_quant_int8_batched"),
+    key=["GROUP_COUNT", "GROUPS"],
+)
+@triton.jit
+def _quantize_query_batched(
+    X,
+    Q,
+    S,
+    stride_x,
+    GROUP_COUNT,
+    GROUPS: tl.constexpr,
+    UE8M0: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr,
+):
+    group = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    row, column = group // GROUPS, (group % GROUPS) * 128
+    d = tl.arange(0, 128)
+    values = tl.load(
+        X + row[:, None] * stride_x + column[:, None] + d[None, :],
+        group[:, None] < GROUP_COUNT,
+        other=0,
+    )
+    quantized, scale = _quantize(values, 1e-10, UE8M0)
+    tl.store(
+        Q + group[:, None] * 128 + d[None, :], quantized, group[:, None] < GROUP_COUNT
+    )
+    tl.store(S + group, scale, group < GROUP_COUNT)
 
 
 @triton.jit
@@ -95,7 +128,12 @@ def per_token_group_quant_int8(x, group_size, *, use_ue8m0=True):
         raise ValueError("INT8 indexer query width must be positive")
     q = torch.empty(x.shape, device=x.device, dtype=torch.int8)
     scales = torch.empty((x.shape[0], groups), device=x.device, dtype=torch.float32)
-    if x.shape[0]:
+    count = x.shape[0] * groups
+    if count >= 1024:
+        _quantize_query_batched[lambda meta: (triton.cdiv(count, meta["BLOCK_ROWS"]),)](
+            x, q, scales, x.stride(0), count, groups, use_ue8m0
+        )
+    elif x.shape[0]:
         # Fixed 128-element reduction: no schedule/performance search dimensions.
         _quantize_query[(x.shape[0] * groups,)](
             x, q, scales, x.stride(0), groups, use_ue8m0, num_warps=4
@@ -223,6 +261,42 @@ def _query(q, rank):
     return q[0]
 
 
+@libentry()
+@libtuner(configs=runtime.get_tuned_config("int8_mqa_logits_rows"), key=["M", "N", "H"])
+@triton.jit
+def _prefill_rows(
+    Q,
+    K,
+    KS,
+    W,
+    Starts,
+    Ends,
+    Out,
+    M,
+    N,
+    H: tl.constexpr,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_wm,
+    CLEAN: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    n = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    h, d = tl.arange(0, H), tl.arange(0, 128)
+    q = tl.load(Q + row * stride_qm + h[:, None] * stride_qh + d[None, :])
+    keys = tl.load(K + n[:, None] * stride_kn + d[None, :], n[:, None] < N, other=0)
+    dots = tl.dot(q, tl.trans(keys), out_dtype=tl.int32).to(tl.float32)
+    scales = tl.load(KS + n, n < N, other=0)
+    weights = tl.load(W + row * stride_wm + h)
+    logits = tl.sum(tl.maximum(dots * scales[None, :], 0.0) * weights[:, None], 0)
+    start, end = tl.load(Starts + row), tl.load(Ends + row)
+    valid = (n >= start) & (n < end)
+    value = tl.where(valid, logits, float("-inf") if CLEAN else 0.0)
+    tl.store(Out + row * N + n, value, n < N)
+
+
 def int8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=True):
     """Weighted ReLU MQA from INT8 Q/K and per-key FP32 scales."""
     query = _query(q, 3)
@@ -260,9 +334,12 @@ def int8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=Tru
             raise ValueError("INT8 MQA valid ranges must be contiguous int32 [M]")
     out = torch.empty((m, n), device=query.device, dtype=torch.float32)
     if m and n:
-        _prefill[
+        # Small M cannot amortize padding an M tile and looping over head pairs.
+        # One row/head matrix per program keeps every MMA row useful.
+        kernel = _prefill_rows if m <= 16 else _prefill
+        kernel[
             lambda meta: (
-                triton.cdiv(m, meta["BLOCK_M"]),
+                m if m <= 16 else triton.cdiv(m, meta["BLOCK_M"]),
                 triton.cdiv(n, meta["BLOCK_N"]),
             )
         ](
