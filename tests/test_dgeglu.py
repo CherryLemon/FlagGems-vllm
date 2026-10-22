@@ -14,6 +14,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import flaggems_vllm
 
@@ -56,16 +57,27 @@ def test_dgeglu(shape, dtype):
 
 
 @pytest.mark.dgeglu
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape", [(3, 254), (2, 3, 512)])
+@pytest.mark.parametrize(
+    "shape", [(1, 2), (3, 254), (2, 3, 512), (7, 130), (64, 512), (1024, 4096)]
+)
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
 def test_dgeglu_torch_reference(shape, dtype):
-    """Keep math-shim compatibility covered without TransformerEngine."""
-    x = torch.randn(shape, dtype=dtype, device=flaggems_vllm.device)
-    reference = x.float().detach().requires_grad_(True)
-    a, b = reference.chunk(2, dim=-1)
-    expected = torch.nn.functional.gelu(a, approximate="tanh") * b
-    grad = torch.randn_like(expected).to(dtype)
-    expected.backward(grad.float())
-    actual = flaggems_vllm.dgeglu(grad, x)
-    expected = reference.grad
-    utils.gems_assert_close(actual, expected.to(dtype), dtype)
+    torch.manual_seed(0)
+    input_tensor = torch.randn(shape, dtype=dtype, device=flaggems_vllm.device)
+    original = input_tensor.cpu().clone()
+    ref_input = original.double().requires_grad_(True)
+    a, b = ref_input.chunk(2, dim=-1)
+    ref_output = F.gelu(a, approximate="tanh") * b
+    grad_output = torch.randn(
+        ref_output.shape, dtype=dtype, device=flaggems_vllm.device
+    )
+    original_grad = grad_output.cpu().clone()
+    (reference,) = torch.autograd.grad(ref_output, ref_input, original_grad.double())
+
+    result = flaggems_vllm.dgeglu(grad_output, input_tensor)
+
+    assert result.shape == input_tensor.shape
+    assert result.device == input_tensor.device
+    utils.gems_assert_close(result.cpu(), reference, dtype)
+    torch.testing.assert_close(input_tensor.cpu(), original, rtol=0, atol=0)
+    torch.testing.assert_close(grad_output.cpu(), original_grad, rtol=0, atol=0)
