@@ -44,6 +44,15 @@ def _is_fp8_fnuz(dtype: torch.dtype) -> bool:
     return hasattr(torch, "float8_e4m3fnuz") and dtype == torch.float8_e4m3fnuz
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=1),
+        triton.Config({}, num_warps=2),
+        triton.Config({}, num_warps=4),
+        triton.Config({}, num_warps=8),
+    ],
+    key=["QUANT_BLOCK_SIZE", "NUM_TOKENS_PAD"],
+)
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,
@@ -58,6 +67,7 @@ def _indexer_k_quant_and_cache_kernel(
     QUANT_BLOCK_SIZE: tl.constexpr,
     IS_FNUZ: tl.constexpr,
     USE_UE8M0: tl.constexpr,
+    NUM_TOKENS_PAD: tl.constexpr,
     SOFTWARE_E4M3FN: tl.constexpr = False,
 ):
     tid = tl.program_id(0)
@@ -132,6 +142,7 @@ def indexer_k_quant_and_cache(
     storage_dtype = torch.uint8 if software_e4m3fn else fp8_dtype
     kv_cache_value = kv_cache_flat[:, : block_size * head_dim].view(storage_dtype)
     kv_cache_scale = kv_cache_flat[:, block_size * head_dim :].view(torch.float32)
+    num_tokens_pad = triton.next_power_of_2(num_tokens)
     _indexer_k_quant_and_cache_kernel[(num_tokens, triton.cdiv(num_quant_blocks, 4))](
         k,
         kv_cache_value,
@@ -146,4 +157,5 @@ def indexer_k_quant_and_cache(
         IS_FNUZ=_is_fp8_fnuz(fp8_dtype),
         USE_UE8M0=scale_fmt == "ue8m0",
         SOFTWARE_E4M3FN=software_e4m3fn,
+        NUM_TOKENS_PAD=num_tokens_pad,
     )
