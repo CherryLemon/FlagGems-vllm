@@ -233,6 +233,8 @@ def all_registered_keys():
 
 
 __all__ = [
+    "rms_scaled_int8_quant",
+    "supports_rms_scaled_int8_quant",
     "SUPPORTED_FP8_DTYPE",
     "enable",
     "only_enable",
