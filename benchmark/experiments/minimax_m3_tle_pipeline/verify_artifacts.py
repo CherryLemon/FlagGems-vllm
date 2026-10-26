@@ -9,6 +9,8 @@ import io
 import json
 import math
 import statistics
+import subprocess
+import sys
 import tarfile
 from collections import Counter
 from pathlib import Path
@@ -123,6 +125,7 @@ def main():
     assert len(graph_ratios) == 24
     assert graph_count == 22
     assert stress_replays == summary["stress_graph_replays"] == 2200
+    subprocess.run([sys.executable, str(ROOT / "ncu-20261026/verify.py")], check=True)
     print(
         json.dumps(
             {
@@ -135,6 +138,7 @@ def main():
                 "graph_speedup_range": [min(graph_ratios), max(graph_ratios)],
                 "existing_pr_operator_unchanged": True,
                 "gpu_work_started": False,
+                "ncu_followup_verified": True,
             },
             indent=2,
         )

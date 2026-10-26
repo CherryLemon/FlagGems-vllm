@@ -5,6 +5,18 @@ slower than the frozen serving baseline in every timed eager and CUDA Graph
 cell, in all three rounds. This draft preserves the implementations and evidence
 for review. It does not enable an operator or change production dispatch.
 
+## NCU follow-up, 2026-10-26
+
+The [NCU report and matched #85 controls](ncu-20261026/README.md) add 20 profiler
+reports / 45 kernel actions, raw API exports, 14,400 separately timed wrapper
+calls and a [copy-ready reuse explanation](ncu-20261026/REUSE_EXPLANATION.zh-CN.md).
+Synchronization/local traffic and a shared-memory occupancy threshold now have
+measured counter support. The follow-up distinguishes matched FP8-storage BF16
+pipeline tests, matched BF16-storage #85 controls, and unscored #85 FP8-QK
+precision checks. BF16 scattered controls favor #85; the frozen baseline's
+FP8-only sparse-wide arm is disabled there. Those controls are not the current
+deployment configuration and do not rank the deployed FP8 sparse-wide path.
+
 ## Relationship to the existing PR
 
 This branch starts at attention draft
@@ -29,7 +41,7 @@ are AST-identical; the serving version also has `_wide_union_sparse_kernel`,
 [machine-readable AST comparison](comparisons/pr979-baseline.json).
 These timings are not a GPU validation or benchmark of the #979 package wrapper.
 
-## Results
+## Original six-variant results, 2026-10-23
 
 H100 80GB HBM3, SM90; Torch `2.13.0+cu129`; FlagTree `0.7.0` / Triton `3.6.0`
 with the frozen minimal load-mask dependency backport from FlagTree #1415.
@@ -117,7 +129,8 @@ trial and is not a supported mode of these kernels.
   non-WS ring3 wide has 96-104 B stack frames; non-WS ring2 wide has no LDL/STL.
   The audit records TMA/BF16 WGMMA and zero FP8 WGMMA instructions. Larger shared
   footprints, stack traffic and WS resource costs are consistent with the
-  regressions, but **no NCU counters were collected to establish a breakdown**.
+  regressions. No NCU counters were collected in that initial trial; the
+  [2026-10-26 follow-up](ncu-20261026/README.md) now supplies counter evidence.
 
 ## Evidence and reproduction
 
@@ -178,7 +191,7 @@ Other measured settings (gate first, then bench with the same flags) are:
 | non-WS/ring3 | `--no-ws --stages 3 --compact-warps 8` | 8192 |
 | Producer conversion | `--producer-convert --stages 2 --compact-warps 4` | 8192 |
 
-## Validation limits
+## Initial-trial validation limits and follow-up scope
 
 After all six representative variants regressed consistently, production
 promotion stopped. The full q512..8192 x seq16k/32k/64k/long-context matrix,
@@ -187,11 +200,16 @@ duplicate/unsorted cases, genuine TopK GPU replay, rotating/cold KV, multilayer
 and end-to-end runs are **NOT_RUN** for this experiment. Some metadata/empty
 states were exercised inside Graph checks; that does not complete those domains.
 The archive's optional real-routing replay mode requires dumps not distributed
-here. NCU and compute-sanitizer memcheck/racecheck were **NOT_RUN** because the
-experiment container lacked the tools.
+here. NCU and compute-sanitizer memcheck/racecheck were **NOT_RUN in the initial
+trial** because its container lacked the tools. The 2026-10-26 follow-up adds
+NCU and limited BF16-storage q8192 controls; it does not complete the full
+domain matrix. Compute-sanitizer remains NOT_RUN.
 
-No fresh GPU benchmark was run while preparing this PR. Offline verification
+No fresh GPU benchmark was run for the original 2026-10-23 PR packaging or the
+publication of the follow-up. The follow-up GPU measurements were collected
+separately on 2026-10-26. Offline verification
 rehashes the published artifacts and sources, verifies readable-kernel AST
 parity, checks #979's operator is unchanged, and recalculates all timing ratios
-from raw samples. See [PROJECT_CONTRACT.md](PROJECT_CONTRACT.md) for the explicit
+from raw samples, including the follow-up exports. See
+[PROJECT_CONTRACT.md](PROJECT_CONTRACT.md) for the explicit
 research-only integration and autotune exemptions.
