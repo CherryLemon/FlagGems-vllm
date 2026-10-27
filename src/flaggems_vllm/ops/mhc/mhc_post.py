@@ -147,8 +147,10 @@ def _mhc_post_do_bench(kernel_call, quantiles):
     configs=_HC_MULT4_AUTOTUNE_CONFIG,
     key=["H"],
     prune_configs_by={"early_config_prune": _npu_grid_prune},
-    do_bench=(
-        _mhc_post_do_bench if runtime.device.vendor_name == "kunlunxin" else None
+    **(
+        {"do_bench": _mhc_post_do_bench}
+        if runtime.device.vendor_name == "kunlunxin"
+        else {}
     ),
 )
 @triton.jit
@@ -236,8 +238,10 @@ def mhc_post_kernel_hc_mult_4(
     configs=_GENERIC_AUTOTUNE_CONFIG,
     key=["H", "HC"],
     prune_configs_by={"early_config_prune": _npu_grid_prune},
-    do_bench=(
-        _mhc_post_do_bench if runtime.device.vendor_name == "kunlunxin" else None
+    **(
+        {"do_bench": _mhc_post_do_bench}
+        if runtime.device.vendor_name == "kunlunxin"
+        else {}
     ),
 )
 @triton.jit

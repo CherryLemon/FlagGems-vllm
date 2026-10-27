@@ -3,6 +3,8 @@
 """Timer failure recovery must measure completed work and propagate errors."""
 
 import importlib
+import importlib.util
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -125,10 +127,13 @@ def test_mhc_autotuners_share_timer_recovery(
     bench = getattr(module, bench_name)
     for kernel_name in kernel_names:
         kernel = getattr(module, kernel_name)
+        selected = getattr(kernel, "_do_bench", None)
         if module.runtime.device.vendor_name == "kunlunxin":
-            assert kernel.do_bench is bench
+            if selected is None:
+                selected = getattr(kernel, "do_bench", None)
+            assert selected is bench
         else:
-            assert kernel.do_bench is not bench
+            assert selected is not bench
     result = [0.2, 0.1, 0.3]
     calls = []
 
@@ -140,3 +145,38 @@ def test_mhc_autotuners_share_timer_recovery(
     kernel = lambda: None
     assert bench(kernel, (0.5, 0.2, 0.8)) is result
     assert calls == [(kernel, {"warmup": 25, "rep": 100, "quantiles": (0.5, 0.2, 0.8)})]
+
+
+@pytest.mark.parametrize("module_name", ["mhc_pre", "mhc_post"])
+@pytest.mark.parametrize("vendor", ["metax", "nvidia", "mthreads", "ascend", "thead"])
+def test_mhc_source_import_with_legacy_autotune(monkeypatch, module_name, vendor):
+    module = importlib.import_module(f"flaggems_vllm.ops.mhc.{module_name}")
+    native_autotune = module.triton.autotune
+    calls = []
+
+    # Real MetaX CI rejects do_bench, including None, during module import.
+    # This strict constructor boundary delegates accepted arguments to the
+    # installed Triton; it does not impersonate a particular SDK version.
+    def legacy_autotune(configs, key, prune_configs_by=None):
+        calls.append((configs, key))
+        return native_autotune(
+            configs=configs, key=key, prune_configs_by=prune_configs_by
+        )
+
+    monkeypatch.setattr(module.runtime, "device", SimpleNamespace(vendor_name=vendor))
+    monkeypatch.setattr(module.triton, "autotune", legacy_autotune)
+    name = f"flaggems_vllm.ops.mhc._legacy_import_{module_name}"
+    spec = importlib.util.spec_from_file_location(name, module.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, fresh)
+    spec.loader.exec_module(fresh)
+    assert len(calls) == 2
+    kernel_names = (
+        ("mhc_pre_fused_kernel_hc_mult_4", "mhc_pre_generic_kernel")
+        if module_name == "mhc_pre"
+        else ("mhc_post_kernel_hc_mult_4", "mhc_post_kernel_generic")
+    )
+    for kernel_name in kernel_names:
+        kernel = getattr(fresh, kernel_name)
+        assert isinstance(kernel, type(getattr(module, kernel_name)))
+        assert getattr(kernel, "_do_bench", None) is None
