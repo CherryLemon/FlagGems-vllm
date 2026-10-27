@@ -180,6 +180,7 @@ from flaggems_vllm.ops.weightnorm import (
 )
 from flaggems_vllm.ops.weight_norm import weight_norm
 
+
 # isort: on
 
 from flaggems_vllm.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -245,6 +246,7 @@ __all__ = [
     "compute_global_topk_indices_and_lens",
     "concat_and_cache_mla",
     "concat_mla_q",
+    "concat_pad_mla_q_and_sink",
     "concat_query",
     "contiguous_copy",
     "copy_to",
@@ -290,6 +292,7 @@ __all__ = [
     "hc_head_fused_kernel",
     "hc_head_fused_kernel_ref",
     "ihc_post",
+    "ihc_post_pre",
     "ihc_post_ref",
     "ihc_pre",
     "ihc_pre_ref",
@@ -315,6 +318,7 @@ __all__ = [
     "mrope",
     "mul",
     "mul_",
+    "mul_scaled_int8_quant",
     "mv",
     "outer",
     "outplace_fused_experts",
@@ -390,6 +394,23 @@ __all__ = [
 
 # Backend-only APIs have no implementation on other vendors.
 from flaggems_vllm import runtime as _runtime
+
+# These archived numerical contracts are qualified on NVIDIA CUDA only.
+if _runtime.device.vendor_name == "nvidia":
+    from flaggems_vllm.ops.concat_pad_mla_q_and_sink import concat_pad_mla_q_and_sink
+    from flaggems_vllm.ops.ihc_post_pre import ihc_post_pre
+    from flaggems_vllm.ops.mul_scaled_int8_quant import mul_scaled_int8_quant
+else:
+
+    def concat_pad_mla_q_and_sink(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview concat/pad requires NVIDIA CUDA")
+
+    def ihc_post_pre(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview IHC post/pre requires NVIDIA CUDA")
+
+    def mul_scaled_int8_quant(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview mul/INT8 requires NVIDIA CUDA")
+
 
 if _runtime.device.vendor_name == "hygon":
     from flaggems_vllm.runtime.backend._hygon.fused import attention as hygon_attention
