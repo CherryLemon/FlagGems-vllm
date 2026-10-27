@@ -52,7 +52,12 @@ for _alias, _target in _COMPAT_OP_ALIASES.items():
         globals()[_alias] = globals()[_target]
 
 _DIRECT_ONLY_OPS = frozenset(
-    {"concat_pad_mla_q_and_sink", "ihc_post_pre", "mul_scaled_int8_quant"}
+    {
+        "concat_pad_mla_q_and_sink",
+        "ihc_post_pre",
+        "int8_scaled_mm_decode",
+        "mul_scaled_int8_quant",
+    }
 )
 
 _FULL_CONFIG = tuple(
@@ -239,6 +244,7 @@ def all_registered_keys():
 
 
 __all__ = [
+    "int8_scaled_mm_decode",
     "ihc_post_pre",
     "mul_scaled_int8_quant",
     "concat_pad_mla_q_and_sink",

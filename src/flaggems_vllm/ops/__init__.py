@@ -299,6 +299,7 @@ __all__ = [
     "indexer_k_quant_and_cache",
     "inplace_fused_experts",
     "instance_norm",
+    "int8_scaled_mm_decode",
     "invoke_fused_moe_triton_kernel",
     "kpool_compress_and_write_cache",
     "kpool_decode_update_and_maybe_write_cache_batched",
@@ -399,11 +400,15 @@ from flaggems_vllm import runtime as _runtime
 if _runtime.device.vendor_name == "nvidia":
     from flaggems_vllm.ops.concat_pad_mla_q_and_sink import concat_pad_mla_q_and_sink
     from flaggems_vllm.ops.ihc_post_pre import ihc_post_pre
+    from flaggems_vllm.ops.int8_scaled_mm_decode import int8_scaled_mm_decode
     from flaggems_vllm.ops.mul_scaled_int8_quant import mul_scaled_int8_quant
 else:
 
     def concat_pad_mla_q_and_sink(*args, **kwargs):
         raise NotImplementedError("Hy4-preview concat/pad requires NVIDIA CUDA")
+
+    def int8_scaled_mm_decode(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview INT8 decode requires NVIDIA SM90 CUDA")
 
     def ihc_post_pre(*args, **kwargs):
         raise NotImplementedError("Hy4-preview IHC post/pre requires NVIDIA CUDA")

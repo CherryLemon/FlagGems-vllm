@@ -312,3 +312,45 @@ def test_grouped_topk_score_1():
 
     bench.set_gems(flaggems_vllm.grouped_topk)
     bench.run()
+
+
+class Hy4SingleGroupBenchmark(base.Benchmark):
+    def set_shapes(self, shape_file_path=None):
+        self.shapes = [(m, 256) for m in (1, 2, 4, 8, 16, 32, 64, 1024)]
+        self.shape_desc = "Hy4-preview routed tokens, experts"
+
+    def get_input_iter(self, dtype):
+        for rows, experts in self.shapes:
+            yield (
+                torch.randn(rows, experts, device=self.device, dtype=dtype),
+                torch.randn(experts, device=self.device, dtype=dtype) / 16,
+            )
+
+
+def hy4_single_group_reference(scores, bias):
+    unbiased = 0.5 * torch.tanh(0.5 * scores) + 0.5
+    indices = torch.topk(unbiased + bias, 8, dim=-1).indices
+    selected = unbiased.gather(-1, indices)
+    weights = selected * (2.827 / (selected.sum(-1, keepdim=True) + 1e-20))
+    return weights, indices.int()
+
+
+def hy4_single_group_candidate(scores, bias):
+    return flaggems_vllm.grouped_topk(scores, 1, 1, 8, True, 2.827, bias, 1)
+
+
+@pytest.mark.grouped_topk
+@torch.inference_mode()
+def test_perf_hy4_single_group_fusion(monkeypatch):
+    import importlib
+
+    module = importlib.import_module("flaggems_vllm.ops.grouped_topk")
+    monkeypatch.setattr(module, "_GROUPED_TOPK_SCORE_FUSION", True)
+    monkeypatch.setattr(module, "_GROUPED_TOPK_SINGLE_GROUP_FUSION", True)
+    bench = Hy4SingleGroupBenchmark(
+        op_name="grouped_topk",
+        torch_op=hy4_single_group_reference,
+        gems_op=hy4_single_group_candidate,
+        dtypes=[torch.float32],
+    )
+    bench.run()

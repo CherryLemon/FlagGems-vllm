@@ -615,3 +615,40 @@ def test_grouped_topk_sigmoid(renormalize):
     atol, rtol = get_tolerance(dtype, 1, renormalize)
     res_weights = utils.to_reference(res_weights)
     torch.testing.assert_close(res_weights, ref_weights, atol=atol, rtol=rtol)
+
+
+@pytest.mark.grouped_topk
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("rows", [1, 4, 64, 1024])
+@torch.inference_mode()
+def test_hy4_e23_single_group_score_fusion(rows, monkeypatch):
+    import importlib
+
+    module = importlib.import_module("flaggems_vllm.ops.grouped_topk")
+    generator = torch.Generator(device="cpu").manual_seed(2026)
+    scores = torch.randn(rows, 256, generator=generator).cuda()
+    bias = (torch.randn(256, generator=generator) / 16).cuda()
+    monkeypatch.setattr(module, "_GROUPED_TOPK_SCORE_FUSION", True)
+    monkeypatch.setattr(module, "_GROUPED_TOPK_SINGLE_GROUP_FUSION", False)
+    expected = module.grouped_topk(scores, 1, 1, 8, True, 2.827, bias, 1)
+    monkeypatch.setattr(module, "_GROUPED_TOPK_SINGLE_GROUP_FUSION", True)
+    actual = module.grouped_topk(scores, 1, 1, 8, True, 2.827, bias, 1)
+    for candidate, baseline in zip(actual, expected):
+        assert torch.equal(candidate, baseline)
+    # Independent mathematical scores, without the correction bias in weights.
+    unbiased = 0.5 * torch.tanh(0.5 * scores.cpu()) + 0.5
+    selected = unbiased.gather(1, actual[1].cpu().long())
+    weights = selected * (2.827 / (selected.sum(-1, keepdim=True) + 1e-20))
+    torch.testing.assert_close(actual[0].cpu(), weights, rtol=2e-6, atol=2e-6)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(stream):
+        module.grouped_topk(scores, 1, 1, 8, True, 2.827, bias, 1)
+        with torch.cuda.graph(graph, stream=stream):
+            captured = module.grouped_topk(scores, 1, 1, 8, True, 2.827, bias, 1)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph.replay()
+    torch.cuda.synchronize()
+    for replay, eager in zip(captured, actual):
+        assert torch.equal(replay, eager)

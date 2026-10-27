@@ -1,6 +1,6 @@
 # Hy4-preview E23 operator delivery
 
-These three NVIDIA CUDA direct APIs recover numerical implementations used by the archived
+These four NVIDIA CUDA direct APIs recover numerical implementations used by the archived
 E23 Hy4-preview source bundle. They are explicit calls; importing this package
 does not enable model scheduling or install a new aten registration. Other
 backends expose an explicit unsupported error without importing NVIDIA tuning
@@ -28,6 +28,7 @@ dual-output API is tracked separately in PR #1001.
 | API | Input/output and semantics | Unsupported scope |
 | --- | --- | --- |
 | ihc_post_pre | Canonical CUDA BF16 x[M,6144], residual[M,4,6144], FP32 post[M,4], weight[8,24576], scale[2], base[8]; M=0..1024. Returns BF16 reduced[M,6144], FP32 next gates[M,4], BF16 rounded residual[M,4,6144]. Post scatter is rounded to BF16 before the following RMS/projection reduction. | Other shapes, layouts, devices or training; finite scalar parameters required. No backward API. |
+| int8_scaled_mm_decode | SM90 CUDA INT8 A[M,1024], column-major B[1024,6144], FP32 per-row/channel scales; M1..64. Returns BF16[M,6144], preserving scale_b*INT32acc then scale_a then BF16. | Other geometry, architectures, layouts, nonzero offsets, bias or output dtype. No backward. |
 | mul_scaled_int8_quant | Equal CUDA BF16 row-major a,b[M,N], N=1..16384, wider row strides allowed. Product rounds to BF16 before FP32 absmax, nearest-even saturating INT8 conversion and FP32 scale[M,1]. Optional output buffers follow the validated disjoint-storage contract. M=0 returns empty outputs. | HIP, non-CUDA, other dtypes, inner strides or training. No broadcasting/backward. |
 | concat_pad_mla_q_and_sink | CUDA BF16 nope[M,H,N], rope[M,H or 1,R], FP32 sink[H], caller outputs BF16[M,HP,N+R] and FP32[HP], HP>=H. Copies source bits, fills padded query with +0 and padded sink with -Inf. | Nonpositive/symbolic dimensions, unsafe spans/strides, wrong dtypes, training or invalid outputs. No backward. |
 
@@ -38,6 +39,9 @@ dual-output API is tracked separately in PR #1001.
 | General | Supported row strides and rope head sharing | Same qualified kernels; metadata routing only | Strided mul and shared-rope cases |
 | Unsupported | Outside explicit contract | Raise before launch, no Torch compute fallback | Existing capability/metadata gates |
 | External library | None for numerical result | No external compute provider | Static source audit |
+
+INT8 decode preserves the qualified SM90 tile64x64x256,4 warps,3 stages and
+scale_b-before-scale_a epilogue, with no new schedule.
 
 Fixed-schedule exemptions preserve the archived reduction tree and rounding.
 IHC uses K-splits=24, BLOCK_K=1024, 8 warps then BLOCK_D=1024,4 warps;
@@ -51,6 +55,7 @@ and its optional preparation/cache API are not included.
 | API | Archived full-source SHA256 | Existing qualification |
 | --- | --- | --- |
 | ihc_post_pre | a1cb0cd02e57957206b2b758039c385f86a4918f3ed3a570a1349489c523a0d7 | E8 component batch2 IHC BF16 bits and ordinary graph, M=1/3/8/64/1024; E23 actual profile |
+| int8_scaled_mm_decode | 865a04cab00ebf9b94967a7fe962784638938953e785da0d8f164c9bd105a1d3 | E9 output-projection public API math/ordinary graph gate; primitive195 cases and all decode buckets; E23 actual profile |
 | mul_scaled_int8_quant | 7745f6307a3c53d460f9055b1c2f01a89407798d4253e5a9389c59079eb2dab8 | E16 gate INT8 finite/nonfinite numerical and ordinary graph admission; E23 actual profile |
 | concat_pad_mla_q_and_sink | b7f48759de3a3c9256ea419b7f29c73398aeb553f318255195f79e6a3d9da68b | Final MLA composite r3 admission, 67 numerical/graph cases and all decode buckets; E23 actual profile |
 
