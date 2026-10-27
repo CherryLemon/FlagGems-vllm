@@ -229,8 +229,6 @@ from flaggems_vllm.ops.vit_attention import (
 )
 
 __all__ = [
-    "rms_scaled_int8_quant",
-    "supports_rms_scaled_int8_quant",
     "act_quant_triton",
     "add_rms_norm",
     "apply_repetition_penalties",
@@ -360,6 +358,7 @@ __all__ = [
     "reglu",
     "reshape_and_cache",
     "reshape_and_cache_flash",
+    "rms_scaled_int8_quant",
     "router_gemm",
     "rwkv_ka_fusion",
     "rwkv_mm_sparsity",
@@ -377,6 +376,7 @@ __all__ = [
     "sparse_attn_triton",
     "stage_deepseek_v4_mega_moe_inputs",
     "SUPPORTED_FP8_DTYPE",
+    "supports_rms_scaled_int8_quant",
     "swiglu",
     "top_k_per_row_decode",
     "top_k_per_row_prefill",
