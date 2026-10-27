@@ -221,6 +221,33 @@ PY
 
 If a model and vLLM runtime are available, run a small vLLM offline inference from the `vllm-plugin-fl` repository examples, for example `examples/offline_inference.py`.
 
+### Explicit inference APIs
+
+These NVIDIA CUDA APIs are explicit calls and do not install model hooks or
+ATen registrations. Unsupported metadata raises before launch; callers retain
+ownership of framework selection, request metadata and workspace lifetime.
+
+| API | Supported contract |
+| --- | --- |
+| `ihc_post_pre` | BF16 residual scatter and next iHC pre reduction at hidden 6144, HC=4, M=0..1024; materialize the BF16 residual before the FP32 reduction. |
+| `mul_scaled_int8_quant` | BF16 row-major product, preserving BF16 rounding before per-row signed INT8 quantization; optional disjoint output buffers. |
+| `int8_scaled_mm_decode` | SM90 INT8 projection at M=1..64, K=1024, N=6144; FP32 channel scaling precedes row scaling, then BF16 output. |
+| `concat_pad_mla_q_and_sink` | Raw-bit BF16 query concatenation and head padding; pad FP32 sinks with negative infinity into caller-owned outputs. |
+| `mrope_strided_cache` | Adjacent-pair BF16 M-RoPE on gapped Q heads, T<=1024, H=4/32, rotary width 64; preserve native Q allocation and K-view behavior. |
+
+The existing `fused_moe` API also accepts clamped SiLU and the explicit
+`quant_silu` mode of its existing `FLAG_GEMS_W8A8_QUANT_FUSION` setting. It retains
+the BF16 activation workspace and the live quantization registrar's division
+semantics. Ordinary routing continues to use the current-main `grouped_topk`.
+Request-ID, slot and sampled-token preparation remain framework responsibilities.
+
+Fixed-schedule exemptions preserve the iHC reduction tree, SM90 projection,
+concat transport, M-RoPE and MoE schedules. Multiply/quantization reuses
+`scaled_int8_quant_dynamic_single` restricted to four warps and one stage.
+The finite functional tests and matching `benchmark/test_*_perf.py` entry points
+require the installed CUDA environment. Historical component measurements live
+in the pull request; current-head GPU and full-model qualification remain pending.
+
 ### Notes
 
 - `--collect-only` is recommended first to quickly check import and test discovery.

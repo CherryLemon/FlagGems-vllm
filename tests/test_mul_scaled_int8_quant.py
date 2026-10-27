@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 """Native finite quantization contract and ordinary graph replay."""
+
 import pytest
 import torch
 
@@ -51,7 +52,12 @@ def test_mul_scaled_int8_quant(rows, width):
         with torch.cuda.graph(graph, stream=stream):
             graph_q, graph_scale = mul_scaled_int8_quant(a, b)
     torch.cuda.current_stream().wait_stream(stream)
+    a_cpu.neg_()
+    a.copy_(a_cpu)
+    graph_q.fill_(17)
+    graph_scale.fill_(17)
+    expected = reference(a_cpu, b_cpu)
     graph.replay()
     torch.cuda.synchronize()
-    assert torch.equal(graph_q, q)
-    assert torch.equal(graph_scale, scale)
+    assert torch.equal(graph_q.cpu(), expected[0])
+    assert torch.equal(graph_scale.cpu(), expected[1])

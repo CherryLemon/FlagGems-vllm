@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 """Finite raw-bit transport and ordinary CUDA graph replay."""
+
 import pytest
 import torch
 
@@ -34,6 +35,11 @@ def test_concat_pad_mla_q_and_sink(rows, rope_heads):
         with torch.cuda.graph(graph, stream=stream):
             concat_pad_mla_q_and_sink(nope, rope, sink, out_q, out_sink)
     torch.cuda.current_stream().wait_stream(stream)
+    nope.neg_()
+    rope.neg_()
+    expected[:, :4] = torch.cat((nope, rope.expand(rows, 4, 64)), -1)
+    out_q.fill_(17)
+    out_sink.fill_(17)
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(out_q.view(torch.int16), expected.view(torch.int16))

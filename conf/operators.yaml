@@ -61,28 +61,6 @@ ops:
       - NeuralNetwork
     stages:
       - stable: '2.0'
-  - id: async_input_correct
-    description: Correct native async integer metadata from a validated I64 packet.
-    for:
-      - async_input_correct
-    labels:
-      - fused
-      - vLLM
-    kind:
-      - NeuralNetwork
-    stages:
-      - alpha: '5.5'
-  - id: async_input_gather
-    description: Gather sampled and draft IDs from validated integer packet mappings.
-    for:
-      - async_input_gather
-    labels:
-      - fused
-      - vLLM
-    kind:
-      - NeuralNetwork
-    stages:
-      - alpha: '5.5'
   - id: beam_search_score
     description: Computes beam search scores by adding cumulative log probabilities
       with new token scores.
@@ -1052,17 +1030,6 @@ ops:
       - NeuralNetwork
     stages:
       - alpha: '5.5'
-  - id: mtp_tail_step
-    description: Update native MTP tail slot and sequence metadata without KV writes.
-    for:
-      - mtp_tail_step
-    labels:
-      - fused
-      - vLLM
-    kind:
-      - NeuralNetwork
-    stages:
-      - alpha: '5.5'
   - id: mul
     description: Multiplies `input` by `other`.
     for:
@@ -1190,17 +1157,6 @@ ops:
       - NeuralNetwork
     stages:
       - beta: '5.3'
-  - id: populate_request_metadata
-    description: Populate request IDs and counts from canonical CUDA query starts.
-    for:
-      - populate_request_metadata
-    labels:
-      - fused
-      - vLLM
-    kind:
-      - NeuralNetwork
-    stages:
-      - alpha: '5.5'
   - id: reglu
     description: |
       Rectified Gated Linear Unit is a variant of GLU that uses ReLU instead of the sigmoid function for gating.

@@ -54,7 +54,13 @@ def test_mrope_strided_cache(rows):
         with torch.cuda.graph(graph, stream=stream):
             captured = mrope_strided_cache(q, k, cache, positions)
     torch.cuda.current_stream().wait_stream(stream)
+    q.neg_()
+    k.neg_()
+    positions.add_(1)
+    expected = reference(q.cpu(), k.cpu(), cache.cpu(), positions.cpu())
+    for output in captured:
+        output.fill_(17)
     graph.replay()
     torch.cuda.synchronize()
-    for a, e in zip(captured, actual):
-        assert torch.equal(a, e)
+    for a, e in zip(captured, expected):
+        torch.testing.assert_close(a.cpu(), e, rtol=0.02, atol=0.015625)

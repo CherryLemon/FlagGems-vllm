@@ -233,7 +233,26 @@ def test_hy4_e23_clamped_silu_quant_math_graph(model_rows, monkeypatch):
                 packed, activation, 1.0, 0.0, 10.0, _silu=True, _validated_spec=spec
             )
     torch.cuda.current_stream().wait_stream(stream)
+    packed_cpu.neg_()
+    packed.copy_(packed_cpu)
+    moe.apply_moe_activation(
+        moe.MoEActivation.SILU,
+        expected_activation,
+        packed,
+        gemm1_clamp_limit=10.0,
+    )
+    expected_q, expected_scale = moe._int8_quantize(
+        expected_activation, None, True, None
+    )
+    gate, up = packed_cpu.float().chunk(2, dim=-1)
+    gate, up = gate.clamp(max=10.0), up.clamp(-10.0, 10.0)
+    gold = (gate / (1.0 + torch.exp(-gate)) * up).bfloat16()
+    activation.fill_(17)
+    graph_q.fill_(17)
+    graph_scale.fill_(17)
     graph.replay()
     torch.cuda.synchronize()
-    assert torch.equal(graph_q, q)
-    assert torch.equal(graph_scale, scale)
+    assert torch.equal(activation, expected_activation)
+    torch.testing.assert_close(activation.cpu(), gold, rtol=0.01, atol=0.03125)
+    assert torch.equal(graph_q, expected_q)
+    assert torch.equal(graph_scale, expected_scale)

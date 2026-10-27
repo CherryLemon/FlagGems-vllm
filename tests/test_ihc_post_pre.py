@@ -1,6 +1,7 @@
 # Copyright 2026 FlagOS Contributors
 # SPDX-License-Identifier: Apache-2.0
 """Finite inference math and ordinary CUDA graph checks."""
+
 import pytest
 import torch
 
@@ -55,7 +56,13 @@ def test_ihc_post_pre(rows):
         with torch.cuda.graph(graph, stream=stream):
             captured = ihc_post_pre(*args)
     torch.cuda.current_stream().wait_stream(stream)
+    args[0].neg_()
+    cpu_args = tuple(x.cpu() if isinstance(x, torch.Tensor) else x for x in args)
+    expected = reference(*cpu_args)
+    for output in captured:
+        output.fill_(17)
     graph.replay()
     torch.cuda.synchronize()
-    for eager, replay in zip(actual, captured):
-        assert torch.equal(eager, replay)
+    torch.testing.assert_close(captured[0].cpu(), expected[0], rtol=0.02, atol=0.0625)
+    torch.testing.assert_close(captured[1].cpu(), expected[1], rtol=2e-5, atol=2e-5)
+    assert torch.equal(captured[2].cpu(), expected[2])
