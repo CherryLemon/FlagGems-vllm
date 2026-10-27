@@ -45,7 +45,7 @@ def test_finite_strided_math_and_ordinary_graph(rows):
     if not rows:
         return
     xf = cpu[:, :n].float()
-    norm = (xf / torch.sqrt((xf * xf).mean(-1, keepdim=True) + 1e-5))
+    norm = xf / torch.sqrt((xf * xf).mean(-1, keepdim=True) + 1e-5)
     norm = (norm.bfloat16() * weight_cpu).bfloat16()
     torch.testing.assert_close(y.cpu(), norm, atol=0.015625, rtol=0.015625)
     # Independently quantize the materialized BF16 value returned by the op.

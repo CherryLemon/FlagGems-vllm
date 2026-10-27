@@ -8,16 +8,34 @@ No registration, serving policy, training, or GEMM is part of this operator.
 import torch
 import triton
 import triton.language as tl
+
 from flaggems_vllm import runtime
 from flaggems_vllm.utils import libentry
 
 
 @libentry()
-@triton.jit(do_not_specialize=["eps", "y_stride_r", "q_stride_r", "scale_stride_r", "x_stride_r"])
+@triton.jit(
+    do_not_specialize=[
+        "eps",
+        "y_stride_r",
+        "q_stride_r",
+        "scale_stride_r",
+        "x_stride_r",
+    ]
+)
 def _rms_scaled_int8_quant_kernel(
-    y_ptr, q_ptr, scale_ptr, x_ptr, weight_ptr,
-    y_stride_r, q_stride_r, scale_stride_r, x_stride_r,
-    N, eps, BLOCK_SIZE: tl.constexpr,
+    y_ptr,
+    q_ptr,
+    scale_ptr,
+    x_ptr,
+    weight_ptr,
+    y_stride_r,
+    q_stride_r,
+    scale_stride_r,
+    x_stride_r,
+    N,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
 ):
     # M is only the launch grid, never a JIT argument. Row strides are runtime
     # inputs excluded from LibEntry exact-value keys; N/BLOCK_SIZE retain the
@@ -44,8 +62,12 @@ def _rms_scaled_int8_quant_kernel(
     inverse = tl.where(absmax == 0.0, 0.0, tl.div_rn(127.0, absmax))
     tl.store(scale_ptr + row * scale_stride_r, scale)
     q32 = tl.inline_asm_elementwise(
-        "cvt.rni.sat.s8.f32 $0, $1;", constraints="=r,f",
-        args=[z * inverse], dtype=tl.int32, is_pure=True, pack=1,
+        "cvt.rni.sat.s8.f32 $0, $1;",
+        constraints="=r,f",
+        args=[z * inverse],
+        dtype=tl.int32,
+        is_pure=True,
+        pack=1,
     )
     tl.store(q_ptr + row * q_stride_r + cols, q32.to(tl.int8), mask=mask)
 
@@ -53,33 +75,49 @@ def _rms_scaled_int8_quant_kernel(
 def supports_rms_scaled_int8_quant(x, weight):
     """Metadata-only support; last-axis contiguous, non-overlapping rows."""
     return (
-        isinstance(x, torch.Tensor) and isinstance(weight, torch.Tensor)
+        isinstance(x, torch.Tensor)
+        and isinstance(weight, torch.Tensor)
         and x.layout == weight.layout == torch.strided
-        and x.ndim == 2 and weight.ndim == 1
+        and x.ndim == 2
+        and weight.ndim == 1
         and x.dtype == weight.dtype == torch.bfloat16
-        and x.is_cuda and weight.device == x.device
-        and torch.version.cuda is not None and torch.version.hip is None
+        and x.is_cuda
+        and weight.device == x.device
+        and torch.version.cuda is not None
+        and torch.version.hip is None
         and 0 < x.shape[1] <= 4096
         and weight.shape == (x.shape[1],)
-        and x.stride(1) == 1 and x.stride(0) >= x.shape[1]
+        and x.stride(1) == 1
+        and x.stride(0) >= x.shape[1]
         and weight.stride(0) == 1
-        and not torch.is_grad_enabled() and not x.requires_grad
-        and not x.is_conj() and not weight.is_conj()
-        and not x.is_neg() and not weight.is_neg()
+        and not torch.is_grad_enabled()
+        and not x.requires_grad
+        and not x.is_conj()
+        and not weight.is_conj()
+        and not x.is_neg()
+        and not weight.is_neg()
     )
 
 
 def _validate_output(value, shape, dtype, device):
     if (
-        not isinstance(value, torch.Tensor) or value.layout != torch.strided
-        or value.shape != shape or value.dtype != dtype or value.device != device
-        or value.stride(1) != 1 or value.stride(0) < shape[1]
-        or value.requires_grad or value.is_conj() or value.is_neg()
+        not isinstance(value, torch.Tensor)
+        or value.layout != torch.strided
+        or value.shape != shape
+        or value.dtype != dtype
+        or value.device != device
+        or value.stride(1) != 1
+        or value.stride(0) < shape[1]
+        or value.requires_grad
+        or value.is_conj()
+        or value.is_neg()
     ):
         raise NotImplementedError("unsupported output dtype/layout/device")
 
 
-def rms_scaled_int8_quant(x, weight, eps=1e-5, *, norm_out=None, out=None, scale_out=None):
+def rms_scaled_int8_quant(
+    x, weight, eps=1e-5, *, norm_out=None, out=None, scale_out=None
+):
     """Return (BF16 norm, INT8 norm, F32 [M,1] scale), with separate storage.
 
     Must run with grad disabled (native norm Parameters can retain requires_grad).
@@ -107,9 +145,20 @@ def rms_scaled_int8_quant(x, weight, eps=1e-5, *, norm_out=None, out=None, scale
     if m:
         with runtime.torch_device_fn.device(x.device):
             _rms_scaled_int8_quant_kernel[(m,)](
-                norm_out, out, scale_out, x, weight,
-                norm_out.stride(0), out.stride(0), scale_out.stride(0), x.stride(0),
-                n, eps, BLOCK_SIZE=triton.next_power_of_2(n), num_warps=4, num_stages=1,
+                norm_out,
+                out,
+                scale_out,
+                x,
+                weight,
+                norm_out.stride(0),
+                out.stride(0),
+                scale_out.stride(0),
+                x.stride(0),
+                n,
+                eps,
+                BLOCK_SIZE=triton.next_power_of_2(n),
+                num_warps=4,
+                num_stages=1,
             )
     return norm_out, out, scale_out
 
