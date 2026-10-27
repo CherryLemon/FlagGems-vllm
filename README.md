@@ -245,8 +245,16 @@ Fixed-schedule exemptions preserve the iHC reduction tree, SM90 projection,
 concat transport, M-RoPE and MoE schedules. Multiply/quantization reuses
 `scaled_int8_quant_dynamic_single` restricted to four warps and one stage.
 The finite functional tests and matching `benchmark/test_*_perf.py` entry points
-require the installed CUDA environment. Historical component measurements live
-in the pull request; current-head GPU and full-model qualification remain pending.
+require the installed CUDA environment. The installed public wheel at
+`ead30f59a34869f12b4837147fbb425581e47280` passed seven existing selected cases
+on H100/SM90 with Torch 2.13.0+cu129 and Triton 3.6.0: one shape for each of the
+five direct APIs, both shared-matmul scale orders, and the private clamped-SiLU/INT8
+component (no skips). The selected ordinary graphs retain owners and refresh
+inputs/outputs. The public `fused_experts_impl` identity was checked, but its full
+SiLU routing/GEMM chain was not executed. These are representative correctness
+checks, not all-parameter qualification or new timings. Other parameters,
+framework integration and full-model qualification remain open. Historical
+component measurements remain separately scoped in the pull request.
 
 ### Notes
 
