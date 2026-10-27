@@ -239,9 +239,14 @@ changing that schedule requires independent numerical qualification.
 
 Run `pytest -q tests/test_rms_scaled_int8_quant.py` for finite math and ordinary
 graph tests, and `pytest -q benchmark/test_rms_scaled_int8_quant_perf.py --level core`
-for the standalone semantic baseline. Current-head GPU and full-model
-qualification remain pending; historical complete-consumer timings are recorded
-in the pull request and are not standalone kernel measurements.
+for the standalone semantic baseline. The installed public wheel at
+`01b94f77c83ffe32fbc847623dcab1435a0fdabb` passed the existing M208, N2048,
+row stride 2624 finite-math and ordinary-graph case on H100/SM90 with Torch
+2.13.0+cu129 and Triton 3.6.0 (one case, no skips). This is representative
+correctness evidence for that input, not validation of every supported shape or
+a performance measurement. Other parameters, framework integration and full-model
+qualification remain open. Historical complete-consumer timings are recorded in
+the pull request and are not standalone kernel measurements.
 
 ### Notes
 
