@@ -795,3 +795,35 @@ def test_seed_all_negative_slots_preserve_padded_tail(pool_size, dtype):
     )
     kpool_seed_tail_cache(tail, key, score, slots, pool_size, HEAD_DIM)
     _assert_storage_exact(backing, expected)
+
+
+@pytest.mark.parametrize("rows", [0, 1, 7, 96])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("gather", [False, True])
+def test_hadamard_stage_order_dtype_strides(monkeypatch, rows, dtype, gather):
+    from types import SimpleNamespace
+
+    torch.manual_seed(73)
+    backing = torch.randn(rows, 256, dtype=dtype, device=device)
+    value = backing[:, ::2]
+    before = backing.clone()
+    matrix = torch.ones(1, 1, dtype=torch.float64, device="cpu")
+    for _ in range(7):
+        matrix = torch.cat(
+            (torch.cat((matrix, matrix), 1), torch.cat((matrix, -matrix), 1)), 0
+        )
+    expected = (value.cpu().double() @ matrix / 128**0.5).to(dtype)
+    vendor = "kunlunxin" if gather else kpool_ops.runtime.device.vendor_name
+    monkeypatch.setattr(
+        kpool_ops.runtime, "device", SimpleNamespace(vendor_name=vendor)
+    )
+    actual = kpool_ops.hadamard128(value)
+    assert actual.shape == value.shape and actual.dtype == dtype
+    assert actual.is_contiguous()
+    torch.testing.assert_close(
+        actual.cpu(),
+        expected,
+        rtol=0 if dtype == torch.bfloat16 else 2e-5,
+        atol=0 if dtype == torch.bfloat16 else 2e-5,
+    )
+    torch.testing.assert_close(backing, before, rtol=0, atol=0)

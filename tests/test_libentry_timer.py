@@ -24,7 +24,8 @@ def test_event_timer_result_is_preserved(monkeypatch):
 @pytest.mark.parametrize("vendor", ["kunlunxin", "nvidia"])
 def test_zero_event_timer_uses_synchronized_elapsed_work(monkeypatch, vendor):
     def broken_timer(*args, **kwargs):
-        raise ZeroDivisionError("warmup / estimate_ms")
+        estimate_ms = 0.0
+        return 1 / estimate_ms
 
     monkeypatch.setattr(libentry.triton.testing, "do_bench", broken_timer)
     monkeypatch.setattr(libentry.runtime, "device", SimpleNamespace(vendor_name=vendor))
@@ -70,3 +71,53 @@ def test_kernel_failure_is_not_swallowed(monkeypatch):
         libentry._do_bench_with_timer_fallback(
             lambda: None, warmup=1, rep=1, quantiles=(0.5, 0.2, 0.8)
         )
+
+
+def test_kernel_zero_division_is_not_treated_as_zero_event_time(monkeypatch):
+    monkeypatch.setattr(
+        libentry.runtime, "device", SimpleNamespace(vendor_name="kunlunxin")
+    )
+    error = ZeroDivisionError("kernel host failure")
+    calls = []
+
+    def kernel():
+        calls.append("kernel")
+        raise error
+
+    def timer(kernel_call, **kwargs):
+        estimate_ms = 0.0
+        kernel_call()
+        return estimate_ms
+
+    monkeypatch.setattr(libentry.triton.testing, "do_bench", timer)
+    monkeypatch.setattr(
+        libentry,
+        "torch_device_fn",
+        SimpleNamespace(synchronize=lambda: calls.append("sync")),
+    )
+    with pytest.raises(ZeroDivisionError) as caught:
+        libentry._do_bench_with_timer_fallback(
+            kernel, warmup=1, rep=1, quantiles=(0.5, 0.2, 0.8)
+        )
+    assert caught.value is error
+    assert calls == ["kernel"]
+
+
+def test_mhc_post_autotuners_share_timer_recovery(monkeypatch):
+    post = importlib.import_module("flaggems_vllm.ops.mhc.mhc_post")
+    for kernel in (post.mhc_post_kernel_hc_mult_4, post.mhc_post_kernel_generic):
+        if post.runtime.device.vendor_name == "kunlunxin":
+            assert kernel.do_bench is post._mhc_post_do_bench
+        else:
+            assert kernel.do_bench is not post._mhc_post_do_bench
+    result = [0.2, 0.1, 0.3]
+    calls = []
+
+    def timer(kernel, **kwargs):
+        calls.append((kernel, kwargs))
+        return result
+
+    monkeypatch.setattr(post, "_do_bench_with_timer_fallback", timer)
+    kernel = lambda: None
+    assert post._mhc_post_do_bench(kernel, (0.5, 0.2, 0.8)) is result
+    assert calls == [(kernel, {"warmup": 25, "rep": 100, "quantiles": (0.5, 0.2, 0.8)})]

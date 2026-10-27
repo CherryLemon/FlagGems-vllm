@@ -31,7 +31,9 @@ import torch
 import triton
 import triton.language as tl
 
+from flaggems_vllm import runtime
 from flaggems_vllm.ops.data_movement import contiguous_copy
+from flaggems_vllm.ops.router_gemm import _general_router_gemm
 
 logger = logging.getLogger(__name__)
 
@@ -695,7 +697,15 @@ def mhc_pre(
     projection = torch.empty((num_tokens, hc_mult3), dtype=torch.float32, device=device)
     # BF16 split-K output atomics round every partial sum. Accumulate once in
     # FP32 through the public BMM API, then retain the original BF16 boundary.
-    bmm_out(x_flat.unsqueeze(0), fn_bf16.t().unsqueeze(0), projection.unsqueeze(0))
+    if runtime.device.vendor_name == "kunlunxin":
+        # The base FlagGems BMM tuner uses zero-resolution XPU event timing.
+        # Reuse the library's existing FP32-accumulating GEMM schedule before
+        # execution; do not retry a failed launch or round split-K partials.
+        _general_router_gemm(
+            x_flat, fn_bf16.t(), projection, num_tokens, hc_mult3, hc_hidden_size
+        )
+    else:
+        bmm_out(x_flat.unsqueeze(0), fn_bf16.t().unsqueeze(0), projection.unsqueeze(0))
     gemm_out = contiguous_copy(
         contiguous_copy(projection, torch.bfloat16), torch.float32
     )

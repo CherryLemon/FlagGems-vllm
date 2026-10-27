@@ -87,8 +87,20 @@ def _do_bench_with_timer_fallback(kernel_call, *, warmup, rep, quantiles):
         return triton.testing.do_bench(
             kernel_call, warmup=warmup, rep=rep, quantiles=quantiles
         )
-    except ZeroDivisionError:
+    except ZeroDivisionError as exc:
         if runtime.device.vendor_name != "kunlunxin":
+            raise
+        origin = exc.__traceback__
+        while origin.tb_next is not None:
+            origin = origin.tb_next
+        # Only the event-time estimate inside Triton's own benchmark may
+        # select wall-clock timing. A kernel/host failure must propagate
+        # with its original identity and must never be executed again.
+        if (
+            origin.tb_frame.f_code
+            is not getattr(triton.testing.do_bench, "__code__", None)
+            or origin.tb_frame.f_locals.get("estimate_ms") != 0
+        ):
             raise
     # Some XPU event timers report zero for short kernels. Measure completed
     # work with a synchronized wall clock instead of inventing a positive time

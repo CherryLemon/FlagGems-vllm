@@ -38,6 +38,9 @@ import triton
 import triton.language as tl
 from triton._flagtree_backend import FLAGTREE_BACKEND
 
+from flaggems_vllm import runtime
+from flaggems_vllm.utils.libentry import _do_bench_with_timer_fallback
+
 logger = logging.getLogger(__name__)
 
 _HC_MULT4_AUTOTUNE_CONFIG = [
@@ -135,10 +138,19 @@ def _npu_grid_prune(configs, nargs, **kwargs):
     return [min(scored, key=_programs)]
 
 
+def _mhc_post_do_bench(kernel_call, quantiles):
+    return _do_bench_with_timer_fallback(
+        kernel_call, warmup=25, rep=100, quantiles=quantiles
+    )
+
+
 @triton.autotune(
     configs=_HC_MULT4_AUTOTUNE_CONFIG,
     key=["H"],
     prune_configs_by={"early_config_prune": _npu_grid_prune},
+    do_bench=(
+        _mhc_post_do_bench if runtime.device.vendor_name == "kunlunxin" else None
+    ),
 )
 @triton.jit
 def mhc_post_kernel_hc_mult_4(
@@ -225,6 +237,9 @@ def mhc_post_kernel_hc_mult_4(
     configs=_GENERIC_AUTOTUNE_CONFIG,
     key=["H", "HC"],
     prune_configs_by={"early_config_prune": _npu_grid_prune},
+    do_bench=(
+        _mhc_post_do_bench if runtime.device.vendor_name == "kunlunxin" else None
+    ),
 )
 @triton.jit
 def mhc_post_kernel_generic(

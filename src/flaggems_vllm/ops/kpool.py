@@ -39,6 +39,19 @@ def _hadamard128(x):
 
 
 @triton.jit
+def _hadamard128_gather(x):
+    # XPU cannot lower the split/join layouts used by the other backends.
+    # XOR addresses the same butterfly partner, preserving stage order and
+    # FP32 accumulation without intermediate BF16 materialization.
+    offsets = tl.arange(0, 128)
+    for stage in tl.static_range(7):
+        stride = 1 << stage
+        partner = tl.gather(x, offsets ^ stride, axis=0)
+        x = tl.where((offsets & stride) == 0, x + partner, partner - x)
+    return x * 0.08838834764831845
+
+
+@triton.jit
 def _fwht_stage(x, N: tl.constexpr, GROUPS: tl.constexpr, STRIDE: tl.constexpr):
     # One FWHT butterfly stage on a flat tensor of N = GROUPS*2*STRIDE elems;
     # same construction as _hadamard128_stage but with a parametric N so it can
@@ -724,11 +737,15 @@ def kpool_decode_update_and_maybe_write_cache_batched(
 @libentry()
 @libtuner(configs=runtime.get_tuned_config("kpool_hadamard"), key=["ROWS"])
 @triton.jit
-def _hadamard_kernel(X, Y, ROWS: tl.constexpr):
+def _hadamard_kernel(X, Y, ROWS: tl.constexpr, USE_GATHER: tl.constexpr = False):
     row = tl.program_id(0)
     offs = tl.arange(0, 128)
     x = tl.load(X + row * 128 + offs).to(tl.float32)
-    tl.store(Y + row * 128 + offs, _hadamard128(x))
+    if USE_GATHER:
+        result = _hadamard128_gather(x)
+    else:
+        result = _hadamard128(x)
+    tl.store(Y + row * 128 + offs, result)
 
 
 def hadamard128(x):
@@ -738,5 +755,7 @@ def hadamard128(x):
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     rows = x.numel() // 128
     if rows:
-        _hadamard_kernel[(rows,)](x, out, rows)
+        _hadamard_kernel[(rows,)](
+            x, out, rows, USE_GATHER=runtime.device.vendor_name == "kunlunxin"
+        )
     return out
