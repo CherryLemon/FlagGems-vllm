@@ -250,11 +250,20 @@ require the installed CUDA environment. The installed public wheel at
 on H100/SM90 with Torch 2.13.0+cu129 and Triton 3.6.0: one shape for each of the
 five direct APIs, both shared-matmul scale orders, and the private clamped-SiLU/INT8
 component (no skips). The selected ordinary graphs retain owners and refresh
-inputs/outputs. The public `fused_experts_impl` identity was checked, but its full
-SiLU routing/GEMM chain was not executed. These are representative correctness
-checks, not all-parameter qualification or new timings. Other parameters,
-framework integration and full-model qualification remain open. Historical
-component measurements remain separately scoped in the pull request.
+inputs/outputs. That R54 run checked the public `fused_experts_impl` identity
+and the private SiLU/quantization component.
+
+A later run of the same public wheel exercised the full `quant_silu` routing,
+two GEMMs, quantization and sum chain on two synthetic BF16 fixtures:
+M=208/256, hidden=6144, intermediate=2048, E=16 and topK=8. Under an independent CPU
+reference for the declared CUDA FP32 reciprocal-multiply scale contract, all ten
+eager, warmup and ordinary A/B/A graph outputs matched bytes. The earlier direct
+CPU scalar-division reference failures remain recorded separately. Only that
+reference scale expression changed; the kernel and original BF16 tolerances
+(atol=0.004/rtol=0.016) did not. These are representative component checks, not
+all-parameter, TP/EP, checkpoint/full-model or performance qualification. Other
+parameters and framework integration remain open. Historical component timings
+remain separately scoped in the pull request; this run adds no benchmark.
 
 ### Notes
 
