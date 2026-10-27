@@ -416,8 +416,33 @@ def _mhc_pre_do_bench(kernel_call, quantiles):
     )
 
 
+def _mhc_pre_hc4_config_prune(configs, named_args, **kwargs):
+    """Keep Kunlun tiles within the hidden-size reduction extent."""
+    hidden_size = named_args["hidden_size"]
+    cap = triton.next_power_of_2(hidden_size)
+    if cap < 128:
+        return [
+            triton.Config({"BLOCK_H": cap}, num_warps=warps, num_stages=1)
+            for warps in (4, 8)
+        ]
+    return [
+        config
+        for config in configs
+        if config.kwargs["BLOCK_H"] <= cap
+        and (hidden_size < 256 or config.kwargs["BLOCK_H"] >= 256)
+    ]
+
+
 @triton.autotune(
-    configs=[
+    configs=(
+        [
+            triton.Config({"BLOCK_H": 128}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_H": 128}, num_warps=8, num_stages=1),
+        ]
+        if runtime.device.vendor_name == "kunlunxin"
+        else []
+    )
+    + [
         triton.Config({"BLOCK_H": 256}, num_warps=4, num_stages=1),
         triton.Config({"BLOCK_H": 256}, num_warps=8, num_stages=1),
         triton.Config({"BLOCK_H": 512}, num_warps=4, num_stages=1),
@@ -431,7 +456,10 @@ def _mhc_pre_do_bench(kernel_call, quantiles):
     ],
     key=["hidden_size", "num_tokens_bucket"],
     **(
-        {"do_bench": _mhc_pre_do_bench}
+        {
+            "do_bench": _mhc_pre_do_bench,
+            "prune_configs_by": {"early_config_prune": _mhc_pre_hc4_config_prune},
+        }
         if runtime.device.vendor_name == "kunlunxin"
         else {}
     ),
