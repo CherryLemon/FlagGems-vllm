@@ -5,10 +5,18 @@
 import pytest
 import torch
 
+import flaggems_vllm
 from flaggems_vllm.ops.rms_scaled_int8_quant import (
     rms_scaled_int8_quant,
     supports_rms_scaled_int8_quant,
 )
+
+
+def test_direct_api_is_not_an_aten_registration():
+    registered = dict(flaggems_vllm._FULL_CONFIG)
+    assert "rms_scaled_int8_quant" not in registered
+    assert "supports_rms_scaled_int8_quant" not in registered
+    assert registered["add_rms_norm"] is flaggems_vllm.add_rms_norm
 
 
 def test_cpu_inputs_decline():
@@ -21,6 +29,7 @@ def test_cpu_inputs_decline():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.rms_scaled_int8_quant
 @pytest.mark.parametrize("rows", [0, 4, 208, 256])
 @torch.inference_mode()
 def test_finite_strided_math_and_ordinary_graph(rows):
@@ -56,15 +65,31 @@ def test_finite_strided_math_and_ordinary_graph(rows):
     expected_q = (z * inverse).round().clamp(-128, 127).to(torch.int8)
     torch.testing.assert_close(q.cpu(), expected_q, atol=0, rtol=0)
     torch.testing.assert_close(scale.cpu(), expected_scale, atol=1e-10, rtol=2e-6)
-    # Retain every owner until after replay; no release, alias or lifetime probe.
-    expected = tuple(t.clone() for t in (y, q, scale))
     graph = torch.cuda.CUDAGraph()
     torch.cuda.synchronize()
     with torch.cuda.graph(graph):
         captured = rms_scaled_int8_quant(x, weight)
+    # Refresh captured inputs and poison every output to prove replay writes
+    # current values, including the zero-row quantization contract.
+    updated_cpu = cpu.clone()
+    updated_cpu[:, :n] = -updated_cpu[:, :n]
+    storage.copy_(updated_cpu)
+    for value in captured:
+        value.fill_(17)
     graph.replay()
     torch.cuda.synchronize()
-    for actual, reference in zip(captured, expected):
-        torch.testing.assert_close(actual, reference, atol=0, rtol=0)
-    torch.testing.assert_close(storage.cpu(), cpu, atol=0, rtol=0)
+    updated_xf = updated_cpu[:, :n].float()
+    updated_norm = updated_xf / torch.sqrt(
+        (updated_xf * updated_xf).mean(-1, keepdim=True) + 1e-5
+    )
+    updated_norm = (updated_norm.bfloat16() * weight_cpu).bfloat16()
+    replay_y, replay_q, replay_scale = (value.cpu() for value in captured)
+    torch.testing.assert_close(replay_y, updated_norm, atol=0.015625, rtol=0.015625)
+    replay_z = replay_y.float()
+    replay_absmax = replay_z.abs().amax(-1, keepdim=True)
+    replay_inv = torch.where(replay_absmax == 0, 0.0, 127 / replay_absmax)
+    replay_expected_q = (replay_z * replay_inv).round().clamp(-128, 127).to(torch.int8)
+    torch.testing.assert_close(replay_q, replay_expected_q, atol=0, rtol=0)
+    torch.testing.assert_close(replay_scale, replay_absmax / 127, atol=1e-10, rtol=2e-6)
+    torch.testing.assert_close(storage.cpu(), updated_cpu, atol=0, rtol=0)
     torch.testing.assert_close(weight.cpu(), weight_cpu, atol=0, rtol=0)
