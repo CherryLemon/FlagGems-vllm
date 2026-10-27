@@ -103,13 +103,32 @@ def test_kernel_zero_division_is_not_treated_as_zero_event_time(monkeypatch):
     assert calls == ["kernel"]
 
 
-def test_mhc_post_autotuners_share_timer_recovery(monkeypatch):
-    post = importlib.import_module("flaggems_vllm.ops.mhc.mhc_post")
-    for kernel in (post.mhc_post_kernel_hc_mult_4, post.mhc_post_kernel_generic):
-        if post.runtime.device.vendor_name == "kunlunxin":
-            assert kernel.do_bench is post._mhc_post_do_bench
+@pytest.mark.parametrize(
+    "module_name,kernel_names,bench_name",
+    [
+        (
+            "mhc_post",
+            ("mhc_post_kernel_hc_mult_4", "mhc_post_kernel_generic"),
+            "_mhc_post_do_bench",
+        ),
+        (
+            "mhc_pre",
+            ("mhc_pre_fused_kernel_hc_mult_4", "mhc_pre_generic_kernel"),
+            "_mhc_pre_do_bench",
+        ),
+    ],
+)
+def test_mhc_autotuners_share_timer_recovery(
+    monkeypatch, module_name, kernel_names, bench_name
+):
+    module = importlib.import_module(f"flaggems_vllm.ops.mhc.{module_name}")
+    bench = getattr(module, bench_name)
+    for kernel_name in kernel_names:
+        kernel = getattr(module, kernel_name)
+        if module.runtime.device.vendor_name == "kunlunxin":
+            assert kernel.do_bench is bench
         else:
-            assert kernel.do_bench is not post._mhc_post_do_bench
+            assert kernel.do_bench is not bench
     result = [0.2, 0.1, 0.3]
     calls = []
 
@@ -117,7 +136,7 @@ def test_mhc_post_autotuners_share_timer_recovery(monkeypatch):
         calls.append((kernel, kwargs))
         return result
 
-    monkeypatch.setattr(post, "_do_bench_with_timer_fallback", timer)
+    monkeypatch.setattr(module, "_do_bench_with_timer_fallback", timer)
     kernel = lambda: None
-    assert post._mhc_post_do_bench(kernel, (0.5, 0.2, 0.8)) is result
+    assert bench(kernel, (0.5, 0.2, 0.8)) is result
     assert calls == [(kernel, {"warmup": 25, "rep": 100, "quantiles": (0.5, 0.2, 0.8)})]

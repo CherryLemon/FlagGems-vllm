@@ -799,10 +799,7 @@ def test_seed_all_negative_slots_preserve_padded_tail(pool_size, dtype):
 
 @pytest.mark.parametrize("rows", [0, 1, 7, 96])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("gather", [False, True])
-def test_hadamard_stage_order_dtype_strides(monkeypatch, rows, dtype, gather):
-    from types import SimpleNamespace
-
+def test_hadamard_stage_order_dtype_strides(rows, dtype):
     torch.manual_seed(73)
     backing = torch.randn(rows, 256, dtype=dtype, device=device)
     value = backing[:, ::2]
@@ -813,10 +810,6 @@ def test_hadamard_stage_order_dtype_strides(monkeypatch, rows, dtype, gather):
             (torch.cat((matrix, matrix), 1), torch.cat((matrix, -matrix), 1)), 0
         )
     expected = (value.cpu().double() @ matrix / 128**0.5).to(dtype)
-    vendor = "kunlunxin" if gather else kpool_ops.runtime.device.vendor_name
-    monkeypatch.setattr(
-        kpool_ops.runtime, "device", SimpleNamespace(vendor_name=vendor)
-    )
     actual = kpool_ops.hadamard128(value)
     assert actual.shape == value.shape and actual.dtype == dtype
     assert actual.is_contiguous()
@@ -827,3 +820,74 @@ def test_hadamard_stage_order_dtype_strides(monkeypatch, rows, dtype, gather):
         atol=0 if dtype == torch.bfloat16 else 2e-5,
     )
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("rows", [0, 3])
+def test_kunlun_hadamard_public_host_empty_and_strides(monkeypatch, rows):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        kpool_ops.runtime, "device", SimpleNamespace(vendor_name="kunlunxin")
+    )
+    value = torch.randn(rows, 256, dtype=torch.bfloat16, device=device)[:, ::2]
+    before = value.clone()
+    result = torch.empty(rows, 128, dtype=value.dtype, device=device)
+    calls = []
+
+    def public(x, scale):
+        assert x.is_contiguous()
+        torch.testing.assert_close(x, value, rtol=0, atol=0)
+        calls.append(scale)
+        return result
+
+    monkeypatch.setattr(
+        kpool_ops.flag_gems, "hadamard_transform", public, raising=False
+    )
+    actual = kpool_ops.hadamard128(value)
+    assert actual.shape == value.shape and actual.dtype == value.dtype
+    if rows:
+        assert actual is result
+        assert calls == [0.08838834764831845]
+    else:
+        assert not calls
+    torch.testing.assert_close(value, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "error", [RuntimeError("launch failure"), ZeroDivisionError("host failure")]
+)
+def test_kunlun_hadamard_execution_error_propagates_once(monkeypatch, error):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        kpool_ops.runtime, "device", SimpleNamespace(vendor_name="kunlunxin")
+    )
+    calls = []
+
+    def public(*args, **kwargs):
+        calls.append(True)
+        raise error
+
+    monkeypatch.setattr(
+        kpool_ops.flag_gems, "hadamard_transform", public, raising=False
+    )
+    with pytest.raises(type(error)) as caught:
+        kpool_ops.hadamard128(torch.empty(1, 128, device=device))
+    assert caught.value is error
+    assert calls == [True]
+
+
+def test_kunlun_hadamard_missing_public_capability_precedes_copy(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        kpool_ops.runtime, "device", SimpleNamespace(vendor_name="kunlunxin")
+    )
+    monkeypatch.setattr(kpool_ops.flag_gems, "hadamard_transform", None, raising=False)
+    monkeypatch.setattr(
+        kpool_ops,
+        "contiguous_copy",
+        lambda *args: pytest.fail("copied before capability check"),
+    )
+    with pytest.raises(NotImplementedError, match="public FlagGems hadamard_transform"):
+        kpool_ops.hadamard128(torch.empty(1, 128, device=device))

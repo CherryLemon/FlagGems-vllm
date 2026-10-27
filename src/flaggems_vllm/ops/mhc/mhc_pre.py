@@ -34,6 +34,7 @@ import triton.language as tl
 from flaggems_vllm import runtime
 from flaggems_vllm.ops.data_movement import contiguous_copy
 from flaggems_vllm.ops.router_gemm import _general_router_gemm
+from flaggems_vllm.utils.libentry import _do_bench_with_timer_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -409,6 +410,12 @@ def _mhc_pre_fused_kernel_hc_mult_4_impl(
         )
 
 
+def _mhc_pre_do_bench(kernel_call, quantiles):
+    return _do_bench_with_timer_fallback(
+        kernel_call, warmup=25, rep=100, quantiles=quantiles
+    )
+
+
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_H": 256}, num_warps=4, num_stages=1),
@@ -423,6 +430,7 @@ def _mhc_pre_fused_kernel_hc_mult_4_impl(
         triton.Config({"BLOCK_H": 512}, num_warps=8, num_stages=2),
     ],
     key=["hidden_size", "num_tokens_bucket"],
+    do_bench=(_mhc_pre_do_bench if runtime.device.vendor_name == "kunlunxin" else None),
 )
 @triton.jit
 def mhc_pre_fused_kernel_hc_mult_4(
@@ -487,6 +495,7 @@ def mhc_pre_fused_kernel_hc_mult_4(
         triton.Config({"BLOCK_H": 1024}, num_warps=8, num_stages=1),
     ],
     key=["hidden_size", "num_tokens_bucket", "HC"],
+    do_bench=(_mhc_pre_do_bench if runtime.device.vendor_name == "kunlunxin" else None),
 )
 @triton.jit
 def mhc_pre_generic_kernel(

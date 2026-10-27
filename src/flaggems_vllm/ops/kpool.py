@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import flag_gems
 import torch
 import triton
 import triton.language as tl
@@ -36,19 +37,6 @@ def _hadamard128(x):
     x = _hadamard128_stage(x, 2, 32)
     x = _hadamard128_stage(x, 1, 64)
     return x * 0.08838834764831845  # 1/sqrt(128)
-
-
-@triton.jit
-def _hadamard128_gather(x):
-    # XPU cannot lower the split/join layouts used by the other backends.
-    # XOR addresses the same butterfly partner, preserving stage order and
-    # FP32 accumulation without intermediate BF16 materialization.
-    offsets = tl.arange(0, 128)
-    for stage in tl.static_range(7):
-        stride = 1 << stage
-        partner = tl.gather(x, offsets ^ stride, axis=0)
-        x = tl.where((offsets & stride) == 0, x + partner, partner - x)
-    return x * 0.08838834764831845
 
 
 @triton.jit
@@ -737,25 +725,29 @@ def kpool_decode_update_and_maybe_write_cache_batched(
 @libentry()
 @libtuner(configs=runtime.get_tuned_config("kpool_hadamard"), key=["ROWS"])
 @triton.jit
-def _hadamard_kernel(X, Y, ROWS: tl.constexpr, USE_GATHER: tl.constexpr = False):
+def _hadamard_kernel(X, Y, ROWS: tl.constexpr):
     row = tl.program_id(0)
     offs = tl.arange(0, 128)
     x = tl.load(X + row * 128 + offs).to(tl.float32)
-    if USE_GATHER:
-        result = _hadamard128_gather(x)
-    else:
-        result = _hadamard128(x)
-    tl.store(Y + row * 128 + offs, result)
+    tl.store(Y + row * 128 + offs, _hadamard128(x))
 
 
 def hadamard128(x):
     if x.shape[-1] != 128:
         raise ValueError("Hadamard transform requires last dimension 128")
+    if runtime.device.vendor_name == "kunlunxin" and x.numel():
+        # Public FlagGems dispatch selects Kunlun's existing global-memory
+        # butterflies: FP32 stages 1..64, then normalization and output cast.
+        # Its empty-grid case is handled by the allocation-only path below.
+        transform = getattr(flag_gems, "hadamard_transform", None)
+        if not callable(transform):
+            raise NotImplementedError(
+                "Kunlun Hadamard requires public FlagGems hadamard_transform"
+            )
+        return transform(contiguous_copy(x), scale=0.08838834764831845)
     x = contiguous_copy(x)
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
     rows = x.numel() // 128
     if rows:
-        _hadamard_kernel[(rows,)](
-            x, out, rows, USE_GATHER=runtime.device.vendor_name == "kunlunxin"
-        )
+        _hadamard_kernel[(rows,)](x, out, rows)
     return out
