@@ -53,6 +53,11 @@ for _alias, _target in _COMPAT_OP_ALIASES.items():
 
 _DIRECT_ONLY_OPS = frozenset(
     {
+        "async_input_correct",
+        "async_input_gather",
+        "mtp_tail_step",
+        "populate_request_metadata",
+        "mrope_strided_cache",
         "concat_pad_mla_q_and_sink",
         "ihc_post_pre",
         "int8_scaled_mm_decode",
@@ -244,6 +249,11 @@ def all_registered_keys():
 
 
 __all__ = [
+    "async_input_correct",
+    "async_input_gather",
+    "mtp_tail_step",
+    "populate_request_metadata",
+    "mrope_strided_cache",
     "int8_scaled_mm_decode",
     "ihc_post_pre",
     "mul_scaled_int8_quant",

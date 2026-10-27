@@ -230,6 +230,8 @@ __all__ = [
     "add_rms_norm",
     "apply_repetition_penalties",
     "apply_rotary_pos_emb",
+    "async_input_correct",
+    "async_input_gather",
     "attn_res",
     "beam_search_score",
     "beam_search_score_",
@@ -317,6 +319,8 @@ __all__ = [
     "moe_align_block_size_triton",
     "moe_sum",
     "mrope",
+    "mrope_strided_cache",
+    "mtp_tail_step",
     "mul",
     "mul_",
     "mul_scaled_int8_quant",
@@ -337,6 +341,7 @@ __all__ = [
     "ple_short_conv_",
     "ple_state_gather",
     "ple_state_scatter_",
+    "populate_request_metadata",
     "qsa_compress_groups_with_ratio",
     "qsa_compress_norm_mrope_store_groups",
     "qsa_mqa_paged",
@@ -398,11 +403,39 @@ from flaggems_vllm import runtime as _runtime
 
 # These archived numerical contracts are qualified on NVIDIA CUDA only.
 if _runtime.device.vendor_name == "nvidia":
+    from flaggems_vllm.ops.async_input_staging import (
+        async_input_correct,
+        async_input_gather,
+    )
     from flaggems_vllm.ops.concat_pad_mla_q_and_sink import concat_pad_mla_q_and_sink
     from flaggems_vllm.ops.ihc_post_pre import ihc_post_pre
     from flaggems_vllm.ops.int8_scaled_mm_decode import int8_scaled_mm_decode
+    from flaggems_vllm.ops.mrope_strided_cache import mrope_strided_cache
+    from flaggems_vllm.ops.mtp_tail_state import mtp_tail_step
     from flaggems_vllm.ops.mul_scaled_int8_quant import mul_scaled_int8_quant
+    from flaggems_vllm.ops.request_id_metadata import populate_request_metadata
 else:
+
+    def async_input_correct(*args, **kwargs):
+        raise NotImplementedError(
+            "Hy4-preview async_input_correct requires NVIDIA CUDA"
+        )
+
+    def async_input_gather(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview async_input_gather requires NVIDIA CUDA")
+
+    def mtp_tail_step(*args, **kwargs):
+        raise NotImplementedError("Hy4-preview mtp_tail_step requires NVIDIA CUDA")
+
+    def populate_request_metadata(*args, **kwargs):
+        raise NotImplementedError(
+            "Hy4-preview populate_request_metadata requires NVIDIA CUDA"
+        )
+
+    def mrope_strided_cache(*args, **kwargs):
+        raise NotImplementedError(
+            "Hy4-preview mrope_strided_cache requires NVIDIA CUDA"
+        )
 
     def concat_pad_mla_q_and_sink(*args, **kwargs):
         raise NotImplementedError("Hy4-preview concat/pad requires NVIDIA CUDA")
